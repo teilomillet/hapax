@@ -3,7 +3,7 @@
 A lightweight HTTP server for Large Language Model (LLM) interactions, built with Go.
 
 ## Version
-v0.0.6
+v0.0.7
 
 ## Features
 

@@ -54,6 +54,33 @@ llm:
       - timeout
       - server_error
 
+# Request Processing Configuration
+processing:
+  # Templates for different request types
+  request_templates:
+    # Simple completion template
+    default: "{{.Input}}"
+    
+    # Chat completion template
+    chat: |
+      {{range .Messages}}
+      {{.Role}}: {{.Content}}
+      {{end}}
+    
+    # Function calling template (future)
+    function: |
+      Function Description:
+      {{.FunctionDescription}}
+      
+      Input:
+      {{.Input}}
+  
+  # Response Formatting Options
+  response_formatting:
+    clean_json: true        # Remove markdown and format JSON
+    trim_whitespace: true   # Remove extra whitespace
+    max_length: 8192        # Maximum response length
+
 logging:
   level: info    # debug, info, warn, error
   format: json   # json or text

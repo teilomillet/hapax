@@ -50,6 +50,7 @@ func NewAuthError(requestID, message string, err error) *HapaxError {
 //   - Invalid input formats
 //   - Missing required fields
 //   - Value constraint violations
+//   - Invalid request methods
 //
 // Example:
 //
@@ -58,10 +59,14 @@ func NewAuthError(requestID, message string, err error) *HapaxError {
 //	    "error": "must not be empty",
 //	})
 func NewValidationError(requestID, message string, validationDetails map[string]interface{}) *HapaxError {
+	code := http.StatusBadRequest
+	if message == "Method not allowed" {
+		code = http.StatusMethodNotAllowed
+	}
 	return &HapaxError{
 		Type:      ValidationError,
 		Message:   message,
-		Code:      http.StatusBadRequest,
+		Code:      code,
 		RequestID: requestID,
 		Details:   validationDetails,
 	}

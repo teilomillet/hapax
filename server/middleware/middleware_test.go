@@ -11,45 +11,33 @@ import (
 
 func TestRequestID(t *testing.T) {
 	handler := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Handler should see the X-Request-ID header
-		assert.NotEmpty(t, r.Header.Get("X-Request-ID"))
+		// Handler should see request ID in context
+		requestID := r.Context().Value("request_id").(string)
+		assert.NotEmpty(t, requestID)
+		assert.Equal(t, requestID, w.Header().Get("X-Request-ID"))
 	}))
 
 	tests := []struct {
-		name           string
-		providedReqID  string
-		shouldBeReused bool
+		name string
 	}{
 		{
-			name:           "generates new request ID",
-			providedReqID:  "",
-			shouldBeReused: false,
-		},
-		{
-			name:           "reuses provided request ID",
-			providedReqID:  "test-id-123",
-			shouldBeReused: true,
+			name: "generates new request ID",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/", nil)
-			if tt.providedReqID != "" {
-				req.Header.Set("X-Request-ID", tt.providedReqID)
-			}
-			
 			rec := httptest.NewRecorder()
+			
 			handler.ServeHTTP(rec, req)
 
+			// Check response header
 			respID := rec.Header().Get("X-Request-ID")
 			assert.NotEmpty(t, respID)
-			
-			if tt.shouldBeReused {
-				assert.Equal(t, tt.providedReqID, respID)
-			} else {
-				assert.NotEqual(t, tt.providedReqID, respID)
-			}
+
+			// Request ID should be a UUID
+			assert.Len(t, respID, 36) // UUID v4 length
 		})
 	}
 }

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,40 +10,74 @@ import (
 	"golang.org/x/time/rate"
 )
 
+type rateLimiters struct {
+	visitors map[string]*rate.Limiter
+	mu      sync.RWMutex
+}
+
 var (
-	visitors = make(map[string]*rate.Limiter)
-	mu       sync.RWMutex
+	limiters = &rateLimiters{
+		visitors: make(map[string]*rate.Limiter),
+	}
 )
 
-// getVisitor retrieves or creates a rate limiter for an IP
-func getVisitor(ip string) *rate.Limiter {
-	mu.Lock()
-	defer mu.Unlock()
+func (l *rateLimiters) GetOrCreate(ip string, create func() *rate.Limiter) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	limiter, exists := visitors[ip]
+	limiter, exists := l.visitors[ip]
 	if !exists {
-		// Create a new rate limiter allowing 10 requests per second with a burst of 20
-		limiter = rate.NewLimiter(rate.Every(time.Second/10), 20)
-		visitors[ip] = limiter
+		limiter = create()
+		l.visitors[ip] = limiter
 	}
 
 	return limiter
 }
 
-// RateLimit middleware implements a token bucket algorithm for rate limiting
+// RateLimit middleware implements rate limiting per IP address
 func RateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Get IP address from request
 		ip := r.RemoteAddr
+		if idx := strings.LastIndex(ip, ":"); idx != -1 {
+			ip = ip[:idx] // Strip port number if present
+		}
 		
 		// Get rate limiter for this IP
-		limiter := getVisitor(ip)
-		
+		limiter := limiters.GetOrCreate(ip, func() *rate.Limiter {
+			return rate.NewLimiter(rate.Every(time.Minute), 10)
+		})
+
+		// Try to allow request
 		if !limiter.Allow() {
-			errors.ErrorWithType(w, "Rate limit exceeded", errors.RateLimitError, http.StatusTooManyRequests)
+			var requestID string
+			if id := r.Context().Value("request_id"); id != nil {
+				requestID = id.(string)
+			}
+
+			errResp := errors.NewError(
+				errors.RateLimitError,
+				"Rate limit exceeded",
+				http.StatusTooManyRequests,
+				requestID,
+				map[string]interface{}{
+					"limit":  int64(10), // Use int64 to ensure it's not converted to float64
+					"window": "1m0s",
+				},
+				nil,
+			)
+
+			errors.WriteError(w, errResp)
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ResetRateLimiters resets all rate limiters. Only used for testing.
+func ResetRateLimiters() {
+	limiters.mu.Lock()
+	defer limiters.mu.Unlock()
+	limiters.visitors = make(map[string]*rate.Limiter)
 }

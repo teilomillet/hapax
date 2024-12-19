@@ -91,6 +91,9 @@ const (
 
 	// UnauthorizedError represents unauthorized access attempts
 	UnauthorizedError ErrorType = "unauthorized"
+
+	// TimeoutError represents timeout errors
+	TimeoutError ErrorType = "timeout_error"
 )
 
 // HapaxError is our custom error type that implements the error interface
@@ -148,7 +151,14 @@ func (e *HapaxError) Is(target error) bool {
 func WriteError(w http.ResponseWriter, err *HapaxError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(err.Code)
-	json.NewEncoder(w).Encode(err)
+
+	// Convert HapaxError to ErrorResponse and write it
+	json.NewEncoder(w).Encode(&ErrorResponse{
+		Type:      err.Type,
+		Message:   err.Message,
+		RequestID: err.RequestID,
+		Details:   err.Details,
+	})
 }
 
 // Error is a drop-in replacement for http.Error that creates and writes
