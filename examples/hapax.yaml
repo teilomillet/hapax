@@ -1,0 +1,25 @@
+server:
+  port: 8081
+  read_timeout: 30s
+  write_timeout: 30s
+  max_header_bytes: 1048576  # 1MB
+  shutdown_timeout: 30s
+
+llm:
+  provider: anthropic
+  model: claude-3-5-haiku-20241022
+  api_key: "${ANTHROPIC_API_KEY}"  # Will be replaced with environment variable
+  system_prompt: "You are Claude, a helpful AI assistant."
+  options:
+    temperature: 0.7
+    max_tokens: 2000
+
+logging:
+  level: info  # debug, info, warn, error
+  format: json  # json or text
+
+routes:
+  - path: /v1/completions
+    handler: completion
+  - path: /health
+    handler: health

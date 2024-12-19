@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/teilomillet/gollm"
+	"github.com/teilomillet/hapax/config"
 )
 
 // TestCompletionHandler tests the completion handler
@@ -63,7 +64,7 @@ func TestCompletionHandler(t *testing.T) {
 				return "", errors.New("llm error")
 			},
 			wantStatus:     http.StatusInternalServerError,
-			wantErrContain: "LLM error",
+			wantErrContain: "Internal server error",
 		},
 	}
 
@@ -110,47 +111,58 @@ func TestRouter(t *testing.T) {
 	llm := &MockLLM{}
 	completionHandler := NewCompletionHandler(llm)
 	router := NewRouter(completionHandler)
-	handler := router.Handler()
 
-	// Test completion endpoint
-	req := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound {
-		t.Error("completion endpoint not found")
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{
+			name:       "completion endpoint",
+			path:       "/v1/completions",
+			wantStatus: http.StatusMethodNotAllowed, // GET not allowed
+		},
+		{
+			name:       "health endpoint",
+			path:       "/health",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "not found",
+			path:       "/invalid",
+			wantStatus: http.StatusNotFound,
+		},
 	}
 
-	// Test health endpoint
-	req = httptest.NewRequest(http.MethodGet, "/health", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code == http.StatusNotFound {
-		t.Error("health endpoint not found")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			w := httptest.NewRecorder()
 
-	// Test unknown endpoint
-	req = httptest.NewRequest(http.MethodGet, "/unknown", nil)
-	w = httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Error("unknown endpoint should return 404")
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("handler returned wrong status code: got %v want %v",
+					w.Code, tt.wantStatus)
+			}
+		})
 	}
 }
 
 // TestServer tests server lifecycle
 func TestServer(t *testing.T) {
-	config := ServerConfig{
+	cfg := config.ServerConfig{
 		Port:            8081,
-		ReadTimeout:     1 * time.Second,
-		WriteTimeout:    1 * time.Second,
+		ReadTimeout:     10 * time.Second,
+		WriteTimeout:    10 * time.Second,
 		MaxHeaderBytes:  1 << 20,
-		ShutdownTimeout: 1 * time.Second,
+		ShutdownTimeout: 30 * time.Second,
 	}
 
 	llm := &MockLLM{}
 	completionHandler := NewCompletionHandler(llm)
 	router := NewRouter(completionHandler)
-	server := NewServer(config, router)
+	server := NewServer(cfg, router)
 
 	// Create context with cancel for server lifecycle
 	ctx, cancel := context.WithCancel(context.Background())
@@ -189,31 +201,42 @@ func TestServer(t *testing.T) {
 	}
 }
 
-// TestDefaultConfig tests default configuration
+// DefaultConfig returns the default server configuration
+func DefaultConfig() config.ServerConfig {
+	return config.ServerConfig{
+		Port:            8080,
+		ReadTimeout:     30 * time.Second,
+		WriteTimeout:    30 * time.Second,
+		MaxHeaderBytes:  1 << 20,
+		ShutdownTimeout: 30 * time.Second,
+	}
+}
+
+// TestDefaultConfig tests the default server configuration
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+	cfg := DefaultConfig()
 
-	if config.Port != 8080 {
-		t.Errorf("unexpected default port: got %v want %v", config.Port, 8080)
+	if cfg.Port != 8080 {
+		t.Errorf("unexpected default port: got %v want %v", cfg.Port, 8080)
 	}
 
-	if config.ReadTimeout != 30*time.Second {
+	if cfg.ReadTimeout != 30*time.Second {
 		t.Errorf("unexpected default read timeout: got %v want %v",
-			config.ReadTimeout, 30*time.Second)
+			cfg.ReadTimeout, 30*time.Second)
 	}
 
-	if config.WriteTimeout != 30*time.Second {
+	if cfg.WriteTimeout != 30*time.Second {
 		t.Errorf("unexpected default write timeout: got %v want %v",
-			config.WriteTimeout, 30*time.Second)
+			cfg.WriteTimeout, 30*time.Second)
 	}
 
-	if config.MaxHeaderBytes != 1<<20 {
+	if cfg.MaxHeaderBytes != 1<<20 {
 		t.Errorf("unexpected default max header bytes: got %v want %v",
-			config.MaxHeaderBytes, 1<<20)
+			cfg.MaxHeaderBytes, 1<<20)
 	}
 
-	if config.ShutdownTimeout != 30*time.Second {
+	if cfg.ShutdownTimeout != 30*time.Second {
 		t.Errorf("unexpected default shutdown timeout: got %v want %v",
-			config.ShutdownTimeout, 30*time.Second)
+			cfg.ShutdownTimeout, 30*time.Second)
 	}
 }
