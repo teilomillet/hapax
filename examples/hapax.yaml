@@ -59,7 +59,29 @@ logging:
   format: json   # json or text
 
 routes:
-  - path: /v1/completions
-    handler: completion
-  - path: /health
-    handler: health
+  - path: "/completions"
+    handler: "completion"
+    version: "v1"
+    methods: ["POST"]
+    middleware: ["auth", "ratelimit"]
+    headers:
+      Content-Type: "application/json"
+    health_check:
+      enabled: true
+      interval: 30s
+      timeout: 5s
+      threshold: 3
+      checks:
+        api: "http"
+
+  - path: "/health"
+    handler: "health"
+    version: "v1"
+    methods: ["GET"]
+    health_check:
+      enabled: true
+      interval: 15s
+      timeout: 2s
+      threshold: 2
+      checks:
+        system: "tcp"

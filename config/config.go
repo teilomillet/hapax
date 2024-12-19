@@ -162,6 +162,39 @@ type RouteConfig struct {
 
 	// Handler specifies which handler to use for this route
 	Handler string `yaml:"handler"`
+
+	// Version specifies the API version (e.g., "v1", "v2")
+	Version string `yaml:"version"`
+
+	// Methods specifies the allowed HTTP methods for this route
+	Methods []string `yaml:"methods"`
+
+	// Headers specifies the required headers for this route
+	Headers map[string]string `yaml:"headers,omitempty"`
+
+	// Middleware specifies the route-specific middleware
+	Middleware []string `yaml:"middleware,omitempty"`
+
+	// HealthCheck specifies the health check configuration for this route
+	HealthCheck *HealthCheck `yaml:"health_check,omitempty"`
+}
+
+// HealthCheck defines health check configuration for a route
+type HealthCheck struct {
+	// Enabled specifies whether health checks are enabled for this route
+	Enabled bool `yaml:"enabled"`
+
+	// Interval specifies the interval between health checks
+	Interval time.Duration `yaml:"interval"`
+
+	// Timeout specifies the timeout for health checks
+	Timeout time.Duration `yaml:"timeout"`
+
+	// Threshold specifies the number of failures before marking the route as unhealthy
+	Threshold int `yaml:"threshold"`
+
+	// Checks specifies the map of check name to check type
+	Checks map[string]string `yaml:"checks"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults
@@ -189,8 +222,8 @@ func DefaultConfig() *Config {
 			Format: "json",
 		},
 		Routes: []RouteConfig{
-			{Path: "/v1/completions", Handler: "completion"},
-			{Path: "/health", Handler: "health"},
+			{Path: "/v1/completions", Handler: "completion", Version: "v1"},
+			{Path: "/health", Handler: "health", Version: "v1"},
 		},
 	}
 }
@@ -293,6 +326,9 @@ func (c *Config) Validate() error {
 		}
 		if route.Handler == "" {
 			return fmt.Errorf("empty handler in route %d", i)
+		}
+		if route.Version == "" {
+			return fmt.Errorf("empty version in route %d", i)
 		}
 	}
 

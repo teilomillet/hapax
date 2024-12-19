@@ -65,17 +65,23 @@ const (
 	// AuthError represents authentication and authorization failures
 	AuthError ErrorType = "authentication_error"
 
-	// ValidationError represents request validation failures
+	// ValidationError represents input validation failures
 	ValidationError ErrorType = "validation_error"
-
-	// RateLimitError represents rate limiting or quota exceeded errors
-	RateLimitError ErrorType = "rate_limit_error"
-
-	// ProviderError represents errors from the LLM provider
-	ProviderError ErrorType = "provider_error"
 
 	// InternalError represents unexpected internal server errors
 	InternalError ErrorType = "internal_error"
+
+	// ConfigError represents configuration-related errors
+	ConfigError ErrorType = "config_error"
+
+	// ProviderError represents errors from LLM providers
+	ProviderError ErrorType = "provider_error"
+
+	// RateLimitError represents rate limiting errors
+	RateLimitError ErrorType = "rate_limit_error"
+
+	// AuthenticationError represents API key authentication failures
+	AuthenticationError ErrorType = "api_key_error"
 
 	// BadRequestError represents invalid request format or parameters
 	BadRequestError ErrorType = "bad_request"

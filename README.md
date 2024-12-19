@@ -3,7 +3,7 @@
 A lightweight HTTP server for Large Language Model (LLM) interactions, built with Go.
 
 ## Version
-v0.0.5a
+v0.0.6
 
 ## Features
 
@@ -11,6 +11,30 @@ v0.0.5a
 - Health check endpoint (`/health`)
 - Configurable server settings (port, timeouts, etc.)
 - Clean shutdown handling
+- Comprehensive test suite with mock LLM implementation
+- Token validation with tiktoken
+  - Automatic token counting
+  - Context length validation
+  - Max tokens validation
+- Middleware architecture:
+  - Request ID tracking
+  - Request timing metrics
+  - Panic recovery
+  - CORS support
+  - API key authentication
+  - Rate limiting (token bucket)
+- Enhanced error handling:
+  - Structured JSON error responses
+  - Request ID tracking in errors
+  - Zap-based logging with context
+  - Custom error types for different scenarios
+  - Seamless error middleware integration
+- Dynamic routing:
+  - Version-based routing (v1, v2)
+  - Route-specific middleware
+  - Health check endpoints
+  - Header validation
+- Configurable server settings (port, timeouts, etc.)
 - Comprehensive test suite with mock LLM implementation
 - Token validation with tiktoken
   - Automatic token counting
@@ -46,6 +70,34 @@ server:
   max_header_bytes: 1048576  # 1MB
   shutdown_timeout: 30s
 
+routes:
+  - path: "/completions"
+    handler: "completion"
+    version: "v1"
+    methods: ["POST"]
+    middleware: ["auth", "ratelimit"]
+    headers:
+      Content-Type: "application/json"
+    health_check:
+      enabled: true
+      interval: 30s
+      timeout: 5s
+      threshold: 3
+      checks:
+        api: "http"
+
+  - path: "/health"
+    handler: "health"
+    version: "v1"
+    methods: ["GET"]
+    health_check:
+      enabled: true
+      interval: 15s
+      timeout: 2s
+      threshold: 2
+      checks:
+        system: "tcp"
+
 llm:
   provider: ollama
   model: llama2
@@ -59,12 +111,6 @@ llm:
 logging:
   level: info  # debug, info, warn, error
   format: json # json, text
-
-routes:
-  - path: /v1/completions
-    handler: completion
-  - path: /health
-    handler: health
 ```
 
 ### Configuration Options

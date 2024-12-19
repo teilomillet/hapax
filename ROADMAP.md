@@ -18,13 +18,13 @@ Focus: Build a reliable, production-ready gateway server leveraging gollm's capa
   - Custom error types
   - Error response formatting
   - Error logging with context
-- [ ] Request validation
+- [x] Request validation
   - Input sanitization
   - Schema validation
   - Content-type verification
 
 ### 1.2 Gateway Features
-- [ ] Route management
+- [x] Route management
   - Dynamic routing based on request properties
   - Version management (v1, v2, etc.)
   - Health check endpoints
@@ -38,11 +38,11 @@ Focus: Build a reliable, production-ready gateway server leveraging gollm's capa
   - Failover handling
 
 ### 1.3 Essential Security & Operations
-- [ ] Authentication system
+- [x] Authentication system
   - API key validation
   - Key management
   - Usage tracking per key
-- [ ] Rate limiting
+- [x] Rate limiting
   - Per-client limits
   - Token bucket implementation
   - Configurable limits
