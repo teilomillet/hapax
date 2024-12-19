@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
+	"github.com/teilomillet/hapax/server/middleware"
 )
 
 // CompletionRequest represents an incoming completion request
@@ -66,28 +68,39 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Router handles HTTP routing
 type Router struct {
+	router     chi.Router
 	completion http.Handler
 }
 
 // NewRouter creates a new router
 func NewRouter(completion http.Handler) *Router {
-	return &Router{
+	r := chi.NewRouter()
+
+	// Add our middleware stack
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RequestTimer)
+	r.Use(middleware.PanicRecovery)
+	r.Use(middleware.CORS)
+
+	router := &Router{
+		router:     r,
 		completion: completion,
 	}
+
+	// Mount routes
+	r.Post("/v1/completions", completion.ServeHTTP)
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+		})
+	})
+
+	return router
 }
 
 // ServeHTTP implements http.Handler
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	switch req.URL.Path {
-	case "/v1/completions":
-		r.completion.ServeHTTP(w, req)
-	case "/health":
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
-		})
-	default:
-		http.NotFound(w, req)
-	}
+	r.router.ServeHTTP(w, req)
 }
 
 // Server represents the HTTP server

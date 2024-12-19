@@ -13,6 +13,7 @@ import (
 
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestCompletionHandler tests the completion handler
@@ -144,6 +145,65 @@ func TestRouter(t *testing.T) {
 			if w.Code != tt.wantStatus {
 				t.Errorf("handler returned wrong status code: got %v want %v",
 					w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestRouterWithMiddleware tests the router with middleware
+func TestRouterWithMiddleware(t *testing.T) {
+	// Create a mock completion handler
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"completion":"test response"}`))
+	})
+
+	router := NewRouter(mockHandler)
+
+	tests := []struct {
+		name           string
+		method         string
+		path           string
+		expectedStatus int
+		checkHeaders   bool
+	}{
+		{
+			name:           "health check",
+			method:         "GET",
+			path:           "/health",
+			expectedStatus: http.StatusOK,
+			checkHeaders:   true,
+		},
+		{
+			name:           "completion endpoint",
+			method:         "POST",
+			path:           "/v1/completions",
+			expectedStatus: http.StatusOK,
+			checkHeaders:   true,
+		},
+		{
+			name:           "not found",
+			method:         "GET",
+			path:           "/nonexistent",
+			expectedStatus: http.StatusNotFound,
+			checkHeaders:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+
+			router.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.expectedStatus, rec.Code)
+
+			if tt.checkHeaders {
+				// Check middleware headers
+				assert.NotEmpty(t, rec.Header().Get("X-Request-ID"))
+				assert.NotEmpty(t, rec.Header().Get("X-Response-Time"))
+				assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
 			}
 		})
 	}

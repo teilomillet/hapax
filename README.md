@@ -2,6 +2,9 @@
 
 A lightweight HTTP server for Large Language Model (LLM) interactions, built with Go.
 
+## Version
+v0.0.3
+
 ## Features
 
 - HTTP server with completion endpoint (`/v1/completions`)
@@ -9,6 +12,11 @@ A lightweight HTTP server for Large Language Model (LLM) interactions, built wit
 - Configurable server settings (port, timeouts, etc.)
 - Clean shutdown handling
 - Comprehensive test suite with mock LLM implementation
+- Middleware architecture:
+  - Request ID tracking
+  - Request timing metrics
+  - Panic recovery
+  - CORS support
 
 ## Installation
 
@@ -123,10 +131,6 @@ go test ./...
 ## License
 
 MIT License
-
-## Version
-
-v0.0.1-alpha
 
 ## Contributing
 
