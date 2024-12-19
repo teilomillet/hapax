@@ -1,3 +1,7 @@
+# Hapax Server Configuration Example
+# This example demonstrates all available configuration options,
+# including optional features like caching and retries.
+
 server:
   port: 8081
   read_timeout: 30s
@@ -6,17 +10,53 @@ server:
   shutdown_timeout: 30s
 
 llm:
-  provider: anthropic
-  model: claude-3-5-haiku-20241022
+  # Provider Configuration
+  provider: anthropic  # openai, anthropic, ollama
+  model: claude-3-haiku-20240307
   api_key: "${ANTHROPIC_API_KEY}"  # Will be replaced with environment variable
+  endpoint: "https://api.anthropic.com/v1"
   system_prompt: "You are Claude, a helpful AI assistant."
+  
+  # Token Management
+  max_context_tokens: 200000  # Claude-3-Haiku context window
+  
+  # Generation Parameters
   options:
-    temperature: 0.7
-    max_tokens: 2000
+    temperature: 0.7        # Controls randomness (0.0-1.0)
+    max_tokens: 4096        # Maximum tokens to generate
+    top_p: 1               # Nucleus sampling threshold
+    frequency_penalty: 0    # Reduces word repetition
+    presence_penalty: 0     # Encourages topic diversity
+    # Additional model-specific options can be added here
+  
+  # Caching Configuration (Optional)
+  cache:
+    enable: true
+    type: memory           # memory, redis, or file
+    ttl: 24h              # Cache entry lifetime
+    max_size: 1000        # Maximum entries for memory cache
+    # Redis Configuration (if type: redis)
+    redis:
+      address: localhost:6379
+      password: ""         # Optional Redis password
+      db: 0               # Redis database number
+    # File Cache Configuration (if type: file)
+    dir: ./cache          # Cache directory path
+  
+  # Retry Configuration (Optional)
+  retry:
+    max_retries: 3
+    initial_delay: 1s
+    max_delay: 30s
+    multiplier: 2
+    retryable_errors:
+      - rate_limit
+      - timeout
+      - server_error
 
 logging:
-  level: info  # debug, info, warn, error
-  format: json  # json or text
+  level: info    # debug, info, warn, error
+  format: json   # json or text
 
 routes:
   - path: /v1/completions

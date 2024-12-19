@@ -76,6 +76,15 @@ const (
 
 	// InternalError represents unexpected internal server errors
 	InternalError ErrorType = "internal_error"
+
+	// BadRequestError represents invalid request format or parameters
+	BadRequestError ErrorType = "bad_request"
+
+	// NotFoundError represents resource not found errors
+	NotFoundError ErrorType = "not_found"
+
+	// UnauthorizedError represents unauthorized access attempts
+	UnauthorizedError ErrorType = "unauthorized"
 )
 
 // HapaxError is our custom error type that implements the error interface

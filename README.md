@@ -12,6 +12,10 @@ v0.0.5a
 - Configurable server settings (port, timeouts, etc.)
 - Clean shutdown handling
 - Comprehensive test suite with mock LLM implementation
+- Token validation with tiktoken
+  - Automatic token counting
+  - Context length validation
+  - Max tokens validation
 - Middleware architecture:
   - Request ID tracking
   - Request timing metrics
@@ -29,6 +33,62 @@ v0.0.5a
 ```bash
 go get github.com/teilomillet/hapax
 ```
+
+## Configuration
+
+Hapax uses YAML for configuration. Here's an example configuration file:
+
+```yaml
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  max_header_bytes: 1048576  # 1MB
+  shutdown_timeout: 30s
+
+llm:
+  provider: ollama
+  model: llama2
+  endpoint: http://localhost:11434
+  system_prompt: "You are a helpful assistant."
+  max_context_tokens: 4096  # Maximum context length for your model
+  options:
+    temperature: 0.7
+    max_tokens: 2000
+
+logging:
+  level: info  # debug, info, warn, error
+  format: json # json, text
+
+routes:
+  - path: /v1/completions
+    handler: completion
+  - path: /health
+    handler: health
+```
+
+### Configuration Options
+
+#### Server Configuration
+- `port`: HTTP server port (default: 8080)
+- `read_timeout`: Maximum duration for reading request body (default: 30s)
+- `write_timeout`: Maximum duration for writing response (default: 30s)
+- `max_header_bytes`: Maximum size of request headers (default: 1MB)
+- `shutdown_timeout`: Maximum duration to wait for graceful shutdown (default: 30s)
+
+#### LLM Configuration
+- `provider`: LLM provider name (e.g., "ollama", "openai")
+- `model`: Model name (e.g., "llama2", "gpt-4")
+- `endpoint`: API endpoint URL
+- `system_prompt`: Default system prompt for conversations
+- `max_context_tokens`: Maximum context length in tokens (model-dependent)
+- `options`: Provider-specific options
+  - `temperature`: Sampling temperature (0.0 to 1.0)
+  - `max_tokens`: Maximum tokens to generate
+
+#### Logging Configuration
+- `level`: Log level (debug, info, warn, error)
+- `format`: Log format (json, text)
 
 ## Quick Start
 
@@ -127,20 +187,6 @@ Error types include:
 - `provider_error`: LLM provider issues
 - `rate_limit_error`: Rate limiting
 - `internal_error`: Unexpected server errors
-
-## Configuration
-
-The server can be configured using the `ServerConfig` struct:
-
-```go
-type ServerConfig struct {
-    Port            int           // Server port (default: 8080)
-    ReadTimeout     time.Duration // HTTP read timeout (default: 30s)
-    WriteTimeout    time.Duration // HTTP write timeout (default: 30s)
-    MaxHeaderBytes  int          // Max header size (default: 1MB)
-    ShutdownTimeout time.Duration // Graceful shutdown timeout (default: 30s)
-}
-```
 
 ## Testing
 
