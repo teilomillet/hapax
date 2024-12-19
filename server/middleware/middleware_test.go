@@ -86,44 +86,48 @@ func TestPanicRecovery(t *testing.T) {
 }
 
 func TestCORS(t *testing.T) {
-	handler := CORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	}))
-
 	tests := []struct {
 		name           string
 		method         string
 		expectedStatus int
-		checkBody      bool
+		expectedHeaders map[string]string
 	}{
 		{
-			name:           "normal request",
-			method:         "GET",
-			expectedStatus: http.StatusOK,
-			checkBody:      true,
+			name:   "preflight request",
+			method: "OPTIONS",
+			expectedStatus: http.StatusNoContent,
+			expectedHeaders: map[string]string{
+				"Access-Control-Allow-Origin":  "*",
+				"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+				"Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, X-CSRF-Token",
+			},
 		},
 		{
-			name:           "preflight request",
-			method:         "OPTIONS",
+			name:   "normal request",
+			method: "GET",
 			expectedStatus: http.StatusOK,
-			checkBody:      false,
+			expectedHeaders: map[string]string{
+				"Access-Control-Allow-Origin":  "*",
+				"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+				"Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, X-CSRF-Token",
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			handler := CORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
 			req := httptest.NewRequest(tt.method, "/", nil)
-			rec := httptest.NewRecorder()
+			rr := httptest.NewRecorder()
 
-			handler.ServeHTTP(rec, req)
+			handler.ServeHTTP(rr, req)
 
-			assert.Equal(t, tt.expectedStatus, rec.Code)
-			assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
-			assert.NotEmpty(t, rec.Header().Get("Access-Control-Allow-Methods"))
-			assert.NotEmpty(t, rec.Header().Get("Access-Control-Allow-Headers"))
-
-			if tt.checkBody {
-				assert.Equal(t, "ok", rec.Body.String())
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+			for key, value := range tt.expectedHeaders {
+				assert.Equal(t, value, rr.Header().Get(key))
 			}
 		})
 	}

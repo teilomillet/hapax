@@ -3,7 +3,7 @@
 A lightweight HTTP server for Large Language Model (LLM) interactions, built with Go.
 
 ## Version
-v0.0.3
+v0.0.4
 
 ## Features
 
@@ -17,6 +17,12 @@ v0.0.3
   - Request timing metrics
   - Panic recovery
   - CORS support
+- Enhanced error handling:
+  - Structured JSON error responses
+  - Request ID tracking in errors
+  - Zap-based logging with context
+  - Custom error types for different scenarios
+  - Seamless error middleware integration
 
 ## Installation
 
@@ -35,9 +41,15 @@ import (
 
     "github.com/teilomillet/hapax"
     "github.com/teilomillet/gollm"
+    "go.uber.org/zap"
 )
 
 func main() {
+    // Initialize logger (optional, defaults to production config)
+    logger, _ := zap.NewProduction()
+    defer logger.Sync()
+    hapax.SetLogger(logger)
+
     // Create an LLM instance (using gollm)
     llm := gollm.New()
 
@@ -50,7 +62,7 @@ func main() {
     // Use default configuration
     config := hapax.DefaultConfig()
 
-    // Create and start the server
+    // Create and start server
     server := hapax.NewServer(config, router)
     if err := server.Start(context.Background()); err != nil {
         log.Fatal(err)
@@ -93,6 +105,28 @@ Check server health status.
     "status": "ok"
 }
 ```
+
+## Error Handling
+
+Hapax provides structured error handling with JSON responses:
+
+```json
+{
+    "type": "validation_error",
+    "message": "Invalid request format",
+    "request_id": "req_123abc",
+    "details": {
+        "field": "prompt",
+        "error": "required"
+    }
+}
+```
+
+Error types include:
+- `validation_error`: Request validation failures
+- `provider_error`: LLM provider issues
+- `rate_limit_error`: Rate limiting
+- `internal_error`: Unexpected server errors
 
 ## Configuration
 

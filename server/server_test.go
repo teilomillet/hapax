@@ -3,7 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
+	stderrors "errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,61 +12,68 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
-	"github.com/stretchr/testify/assert"
+	"github.com/teilomillet/hapax/errors"
 )
 
 // TestCompletionHandler tests the completion handler
 func TestCompletionHandler(t *testing.T) {
 	tests := []struct {
-		name          string
-		method        string
-		body          string
-		generateFunc  func(context.Context, *gollm.Prompt) (string, error)
-		wantStatus    int
-		wantResponse  string
+		name           string
+		method         string
+		body           interface{}
+		generateFunc   func(context.Context, *gollm.Prompt) (string, error)
+		wantStatus     int
+		wantResponse   string
 		wantErrContain string
+		expectJSON     bool
 	}{
 		{
-			name:   "success",
-			method: http.MethodPost,
-			body:   `{"prompt": "Hello"}`,
-			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
-				return "Hello, world!", nil
-			},
-			wantStatus:  http.StatusOK,
-			wantResponse: `{"completion":"Hello, world!"}` + "\n",
-		},
-		{
-			name:       "invalid method",
-			method:     http.MethodGet,
-			wantStatus: http.StatusMethodNotAllowed,
+			name:           "invalid method",
+			method:         http.MethodGet,
+			wantStatus:     http.StatusMethodNotAllowed,
 			wantErrContain: "Method not allowed",
+			expectJSON:     true,
 		},
 		{
 			name:           "invalid json",
 			method:         http.MethodPost,
-			body:           `invalid json`,
+			body:           "invalid json",
 			wantStatus:     http.StatusBadRequest,
 			wantErrContain: "Invalid request body",
+			expectJSON:     true,
 		},
 		{
 			name:           "missing prompt",
 			method:         http.MethodPost,
-			body:           `{}`,
+			body:           map[string]string{},
 			wantStatus:     http.StatusBadRequest,
 			wantErrContain: "prompt is required",
+			expectJSON:     true,
 		},
 		{
 			name:   "llm error",
 			method: http.MethodPost,
-			body:   `{"prompt": "Hello"}`,
+			body:   map[string]string{"prompt": "Hello"},
 			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
-				return "", errors.New("llm error")
+				return "", stderrors.New("llm error")
 			},
 			wantStatus:     http.StatusInternalServerError,
-			wantErrContain: "Internal server error",
+			wantErrContain: "Failed to generate completion",
+			expectJSON:     true,
+		},
+		{
+			name:   "success",
+			method: http.MethodPost,
+			body:   map[string]string{"prompt": "Hello"},
+			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
+				return "Hello, world!", nil
+			},
+			wantStatus:   http.StatusOK,
+			wantResponse: `{"completion":"Hello, world!"}` + "\n",
+			expectJSON:   true,
 		},
 	}
 
@@ -77,8 +85,13 @@ func TestCompletionHandler(t *testing.T) {
 
 			// Create request
 			var body io.Reader
-			if tt.body != "" {
-				body = bytes.NewBufferString(tt.body)
+			if tt.body != nil {
+				if str, ok := tt.body.(string); ok {
+					body = bytes.NewBufferString(str)
+				} else {
+					bodyBytes, _ := json.Marshal(tt.body)
+					body = bytes.NewBuffer(bodyBytes)
+				}
 			}
 			req := httptest.NewRequest(tt.method, "/v1/completions", body)
 			w := httptest.NewRecorder()
@@ -102,6 +115,25 @@ func TestCompletionHandler(t *testing.T) {
 			if tt.wantErrContain != "" && !strings.Contains(w.Body.String(), tt.wantErrContain) {
 				t.Errorf("handler returned unexpected error: got %v want %v",
 					w.Body.String(), tt.wantErrContain)
+			}
+
+			if tt.expectJSON {
+				contentType := w.Header().Get("Content-Type")
+				if contentType != "application/json" {
+					t.Errorf("handler returned wrong content type: got %v want application/json",
+						contentType)
+				}
+
+				if tt.wantErrContain != "" {
+					var errorResp errors.HapaxError
+					if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
+						t.Fatalf("Failed to decode error response: %v", err)
+					}
+					if errorResp.Message != tt.wantErrContain {
+						t.Errorf("handler returned unexpected error: got %v want %v",
+							errorResp.Message, tt.wantErrContain)
+					}
+				}
 			}
 		})
 	}

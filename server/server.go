@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
+	"github.com/teilomillet/hapax/errors"
 	"github.com/teilomillet/hapax/server/middleware"
+	"go.uber.org/zap"
 )
 
 // CompletionRequest represents an incoming completion request
@@ -37,26 +38,25 @@ func NewCompletionHandler(llm gollm.LLM) *CompletionHandler {
 // ServeHTTP implements http.Handler
 func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		errors.ErrorWithType(w, "Method not allowed", errors.ValidationError, http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req CompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		errors.ErrorWithType(w, "Invalid request body", errors.ValidationError, http.StatusBadRequest)
 		return
 	}
 
 	if req.Prompt == "" {
-		http.Error(w, "prompt is required", http.StatusBadRequest)
+		errors.ErrorWithType(w, "prompt is required", errors.ValidationError, http.StatusBadRequest)
 		return
 	}
 
 	prompt := gollm.NewPrompt(req.Prompt)
 	resp, err := h.llm.Generate(r.Context(), prompt)
 	if err != nil {
-		log.Printf("Generation error: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		errors.ErrorWithType(w, "Failed to generate completion", errors.ProviderError, http.StatusInternalServerError)
 		return
 	}
 
@@ -122,52 +122,57 @@ func NewServer(cfg config.ServerConfig, handler http.Handler) *Server {
 }
 
 // Start starts the server and blocks until shutdown
-func (s Server) Start(ctx context.Context) error {
-	// Start server in background
-	errCh := make(chan error, 1)
+func (s *Server) Start(ctx context.Context) error {
+	errChan := make(chan error, 1)
+
 	go func() {
-		log.Printf("Server started on port %s", s.httpServer.Addr)
-		errCh <- s.httpServer.ListenAndServe()
+		errors.DefaultLogger.Info("Server started", zap.String("address", s.httpServer.Addr))
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("server error: %w", err)
+		}
 	}()
 
-	// Wait for context cancellation or server error
 	select {
 	case <-ctx.Done():
-		// Create shutdown context with timeout
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Attempt graceful shutdown
+		errors.DefaultLogger.Info("Shutting down server")
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown error: %w", err)
+			return fmt.Errorf("error during server shutdown: %w", err)
 		}
 		return nil
-	case err := <-errCh:
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("server error: %w", err)
-		}
-		return nil
+
+	case err := <-errChan:
+		return err
 	}
 }
 
 func main() {
-	// Create an LLM client with default provider
+	logger, err := zap.NewProduction()
+	if err != nil {
+		fmt.Printf("Failed to create logger: %v\n", err)
+		return
+	}
+	defer logger.Sync()
+	errors.SetLogger(logger)
+
+	cfg := config.DefaultConfig()
+
 	llm, err := gollm.NewLLM(gollm.SetProvider("ollama"))
 	if err != nil {
-		log.Fatalf("Failed to initialize LLM: %v", err)
+		errors.DefaultLogger.Fatal("Failed to initialize LLM",
+			zap.Error(err),
+		)
 	}
 
-	// Create completion handler
-	completionHandler := NewCompletionHandler(llm)
-
-	// Create router
-	router := NewRouter(completionHandler)
-
-	// Create and start server
-	cfg := config.DefaultConfig()
+	handler := NewCompletionHandler(llm)
+	router := NewRouter(handler)
 	server := NewServer(cfg.Server, router)
 
 	if err := server.Start(context.Background()); err != nil {
-		log.Fatalf("Server error: %v", err)
+		errors.DefaultLogger.Fatal("Server error",
+			zap.Error(err),
+		)
 	}
 }
