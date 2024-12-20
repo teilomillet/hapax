@@ -41,11 +41,19 @@ func init() {
 // 3. Health check endpoint responds correctly
 // 4. Metrics endpoint provides Prometheus-formatted metrics
 func TestDockerBuild(t *testing.T) {
-	ctx := context.Background()
+	if testing.Short() {
+		t.Skip("Skipping docker build test in short mode")
+	}
+	
+	// Docker builds can take a while, especially on CI
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	
 	// cleanup ensures we don't have leftover containers from previous test runs
 	cleanup := func() {
-		exec.CommandContext(ctx, "docker", "rm", "-f", containerName).Run()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		exec.CommandContext(cleanupCtx, "docker", "rm", "-f", containerName).Run()
 	}
 	cleanup() // Clean up any leftover containers
 	defer cleanup()

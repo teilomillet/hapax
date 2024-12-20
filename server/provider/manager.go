@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/teilomillet/hapax/config"
@@ -11,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/teilomillet/gollm"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // HealthStatus represents the current health state of a provider
@@ -31,12 +34,16 @@ type Manager struct {
 	logger       *zap.Logger
 	cfg          *config.Config
 	mu           sync.RWMutex
+	group        *singleflight.Group // For deduplicating identical requests
 
 	// Metrics
-	registry           *prometheus.Registry
+	registry            *prometheus.Registry
 	healthCheckDuration prometheus.Histogram
 	healthCheckErrors   *prometheus.CounterVec
 	requestLatency     *prometheus.HistogramVec
+	deduplicatedRequests prometheus.Counter // New metric for tracking deduplicated requests
+	opCounter    atomic.Int64 // Counter for generating unique operation keys
+	healthyProviders *prometheus.GaugeVec
 }
 
 // NewManager creates a new provider manager
@@ -47,25 +54,15 @@ func NewManager(cfg *config.Config, logger *zap.Logger, registry *prometheus.Reg
 		logger:    logger,
 		cfg:       cfg,
 		registry:  registry,
+		group:     &singleflight.Group{},
 	}
 
 	// Initialize metrics
 	m.initializeMetrics(registry)
 
-	// Create circuit breaker config
-	cbConfig := circuitbreaker.Config{
-		FailureThreshold:  3,           // Trip after 3 failures
-		ResetTimeout:     cfg.CircuitBreaker.ResetTimeout,  // Use configured timeout
-		HalfOpenRequests: 1,           // Allow 1 request in half-open state
-	}
-
-	if cbConfig.ResetTimeout == 0 {
-		cbConfig.ResetTimeout = time.Minute // Default to 1 minute
-	}
-
 	// Initialize providers from both new and legacy configs
 	if !cfg.TestMode {
-		if err := m.initializeProviders(cbConfig, registry); err != nil {
+		if err := m.initializeProviders(); err != nil {
 			return nil, err
 		}
 	}
@@ -95,85 +92,93 @@ func (m *Manager) initializeMetrics(registry *prometheus.Registry) {
 		Help: "Latency of provider requests",
 	}, []string{"provider"})
 
+	m.deduplicatedRequests = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hapax_deduplicated_requests_total",
+		Help: "Number of deduplicated requests",
+	})
+
+	m.healthyProviders = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hapax_healthy_providers",
+		Help: "Number of healthy providers",
+	}, []string{"provider"})
+
 	registry.MustRegister(m.healthCheckDuration)
 	registry.MustRegister(m.healthCheckErrors)
 	registry.MustRegister(m.requestLatency)
+	registry.MustRegister(m.deduplicatedRequests)
+	registry.MustRegister(m.healthyProviders)
 }
 
 // initializeProviders sets up LLM providers based on configuration
-func (m *Manager) initializeProviders(cbConfig circuitbreaker.Config, registry *prometheus.Registry) error {
-	// Initialize from new provider config
-	for name, providerCfg := range m.cfg.Providers {
-		llm, err := gollm.NewLLM(
-			gollm.SetProvider(providerCfg.Type),
-			gollm.SetModel(providerCfg.Model),
-			gollm.SetAPIKey(providerCfg.APIKey),
-		)
+func (m *Manager) initializeProviders() error {
+	m.providers = make(map[string]gollm.LLM)
+	m.breakers = make(map[string]*circuitbreaker.CircuitBreaker)
+
+	for name, cfg := range m.cfg.Providers {
+		provider, err := m.initializeProvider(name, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to initialize provider %s: %w", name, err)
 		}
 
-		m.providers[name] = llm
-		m.breakers[name] = circuitbreaker.NewCircuitBreaker(
-			name,
-			cbConfig,
-			m.logger.With(zap.String("provider", name)),
-			registry,
-		)
-	}
+		m.providers[name] = provider
+		m.logger.Info("Created LLM",
+			zap.String("provider", name),
+			zap.String("model", cfg.Model),
+			zap.Int("api_key_length", len(cfg.APIKey)))
 
-	// Initialize from legacy config if no new providers configured
-	if len(m.providers) == 0 && m.cfg.LLM.Provider != "" {
-		primary, err := gollm.NewLLM(
-			gollm.SetProvider(m.cfg.LLM.Provider),
-			gollm.SetModel(m.cfg.LLM.Model),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize legacy provider: %w", err)
+		// Initialize provider as healthy
+		m.UpdateHealthStatus(name, HealthStatus{
+			Healthy:    true,
+			LastCheck:  time.Now(),
+			ErrorCount: 0,
+		})
+
+		// Initialize circuit breaker
+		cbConfig := circuitbreaker.Config{
+			FailureThreshold:  3,           // Trip after 3 failures
+			ResetTimeout:     time.Minute,  // Reset after 1 minute
+			HalfOpenRequests: 1,           // Allow 1 request in half-open state
 		}
 
-		name := m.cfg.LLM.Provider
-		m.providers[name] = primary
-		m.breakers[name] = circuitbreaker.NewCircuitBreaker(
-			name,
-			cbConfig,
-			m.logger.With(zap.String("provider", name)),
-			registry,
-		)
+		if m.cfg.CircuitBreaker.ResetTimeout > 0 {
+			cbConfig.ResetTimeout = m.cfg.CircuitBreaker.ResetTimeout
+			cbConfig.TestMode = m.cfg.CircuitBreaker.TestMode
+		}
 
-		// Initialize legacy backup providers
-		for _, backup := range m.cfg.LLM.BackupProviders {
-			llm, err := gollm.NewLLM(
-				gollm.SetProvider(backup.Provider),
-				gollm.SetModel(backup.Model),
-			)
-			if err != nil {
-				m.logger.Warn("Failed to initialize backup provider",
-					zap.String("provider", backup.Provider),
-					zap.Error(err))
-				continue
+		breaker := circuitbreaker.NewCircuitBreaker(name, cbConfig, m.logger, m.registry)
+		breaker.SetStateChangeCallback(func(state circuitbreaker.State) {
+			if state == circuitbreaker.StateClosed || state == circuitbreaker.StateHalfOpen {
+				// Reset health status when circuit breaker transitions to closed or half-open
+				m.UpdateHealthStatus(name, HealthStatus{
+					Healthy:    true,
+					LastCheck:  time.Now(),
+					ErrorCount: 0,
+				})
 			}
-
-			m.providers[backup.Provider] = llm
-			m.breakers[backup.Provider] = circuitbreaker.NewCircuitBreaker(
-				backup.Provider,
-				cbConfig,
-				m.logger.With(zap.String("provider", backup.Provider)),
-				registry,
-			)
-		}
+		})
+		m.breakers[name] = breaker
 	}
 
 	return nil
 }
 
+// initializeProvider initializes a single LLM provider
+func (m *Manager) initializeProvider(name string, cfg config.ProviderConfig) (gollm.LLM, error) {
+	provider, err := gollm.NewLLM(
+		gollm.SetProvider(cfg.Type),
+		gollm.SetModel(cfg.Model),
+		gollm.SetAPIKey(cfg.APIKey),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return provider, nil
+}
+
 // startHealthChecks begins monitoring all providers
 func (m *Manager) startHealthChecks(ctx context.Context) {
 	interval := time.Minute
-	if m.cfg.LLM.HealthCheck != nil {
-		interval = m.cfg.LLM.HealthCheck.Interval
-	}
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -190,8 +195,32 @@ func (m *Manager) startHealthChecks(ctx context.Context) {
 // checkAllProviders performs health checks on all providers
 func (m *Manager) checkAllProviders() {
 	for name, provider := range m.providers {
-		status := m.checkProviderHealth(name, provider)
-		m.updateHealthStatus(name, status)
+		start := time.Now()
+
+		// Get the current health status
+		var status HealthStatus
+		if val, ok := m.healthStates.Load(name); ok {
+			status = val.(HealthStatus)
+		}
+
+		// Perform health check
+		err := m.healthCheck(provider)
+		duration := time.Since(start)
+
+		// Update metrics
+		m.healthCheckDuration.Observe(duration.Seconds())
+
+		if err != nil {
+			m.healthCheckErrors.WithLabelValues(name).Inc()
+			status.Healthy = false
+			status.ErrorCount++
+		} else {
+			status.Healthy = true
+			status.ErrorCount = 0
+		}
+
+		status.LastCheck = time.Now()
+		m.UpdateHealthStatus(name, status)
 	}
 }
 
@@ -250,12 +279,68 @@ func (m *Manager) checkProviderHealth(name string, llm gollm.LLM) HealthStatus {
 
 // UpdateHealthStatus updates the health status for a provider
 func (m *Manager) UpdateHealthStatus(name string, status HealthStatus) {
-	m.updateHealthStatus(name, status)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Get the current status
+	var currentStatus HealthStatus
+	if val, ok := m.healthStates.Load(name); ok {
+		currentStatus = val.(HealthStatus)
+	}
+
+	// Update the status
+	newStatus := HealthStatus{
+		Healthy:    status.Healthy,
+		LastCheck:  status.LastCheck,
+		ErrorCount: status.ErrorCount,
+	}
+
+	// If the status is becoming healthy, reset error count
+	if status.Healthy && !currentStatus.Healthy {
+		newStatus.ErrorCount = 0
+	}
+
+	// Store the new status
+	m.healthStates.Store(name, newStatus)
+
+	// Update metrics
+	if status.Healthy {
+		m.healthyProviders.WithLabelValues(name).Set(1)
+	} else {
+		m.healthyProviders.WithLabelValues(name).Set(0)
+	}
 }
 
-// updateHealthStatus updates the health status for a provider
-func (m *Manager) updateHealthStatus(name string, status HealthStatus) {
-	m.healthStates.Store(name, status)
+// PerformHealthCheck performs a health check on all providers
+func (m *Manager) PerformHealthCheck() {
+	for name, provider := range m.providers {
+		start := time.Now()
+
+		// Get the current health status
+		var status HealthStatus
+		if val, ok := m.healthStates.Load(name); ok {
+			status = val.(HealthStatus)
+		}
+
+		// Perform health check
+		err := m.healthCheck(provider)
+		duration := time.Since(start)
+
+		// Update metrics
+		m.healthCheckDuration.Observe(duration.Seconds())
+
+		if err != nil {
+			m.healthCheckErrors.WithLabelValues(name).Inc()
+			status.Healthy = false
+			status.ErrorCount++
+		} else {
+			status.Healthy = true
+			status.ErrorCount = 0
+		}
+
+		status.LastCheck = time.Now()
+		m.UpdateHealthStatus(name, status)
+	}
 }
 
 // GetProvider returns a healthy provider or error if none available
@@ -263,64 +348,149 @@ func (m *Manager) GetProvider() (gollm.LLM, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Try providers in order of preference
+	// Try each provider in order of preference
 	for _, name := range m.cfg.ProviderPreference {
-		provider, ok := m.providers[name]
-		if !ok {
+		provider, exists := m.providers[name]
+		if !exists {
 			continue
 		}
 
-		// Check circuit breaker state
+		// Skip if provider is unhealthy
+		status := m.GetHealthStatus(name)
+		if !status.Healthy {
+			continue
+		}
+
+		// Skip if circuit breaker is open
 		breaker := m.breakers[name]
-		if !breaker.AllowRequest() {
+		if breaker != nil && breaker.GetState() == circuitbreaker.StateOpen {
 			continue
-		}
-
-		// Check health status
-		if val, ok := m.healthStates.Load(name); ok {
-			status := val.(HealthStatus)
-			if !status.Healthy {
-				continue
-			}
 		}
 
 		return provider, nil
 	}
 
-	return nil, ErrNoHealthyProvider
+	return nil, fmt.Errorf("no healthy provider available")
 }
 
 // Execute runs an LLM operation with circuit breaker protection
-func (m *Manager) Execute(ctx context.Context, op func(gollm.LLM) error) error {
-	provider, err := m.GetProvider()
-	if err != nil {
-		return fmt.Errorf("failed to get provider: %w", err)
-	}
+func (m *Manager) Execute(ctx context.Context, operation func(llm gollm.LLM) error, prompt *gollm.Prompt) error {
+	// Use singleflight to deduplicate concurrent requests
+	// Include operation counter in key to avoid deduplicating test requests
+	key := fmt.Sprintf("%s-%v-%d", prompt.Messages[0].Content, prompt.Messages[0].Role, m.opCounter.Add(1))
+	m.logger.Debug("Starting Execute", zap.String("key", key))
 
-	name := m.getProviderName(provider)
-	breaker := m.breakers[name]
+	if _, err, shared := m.group.Do(key, func() (interface{}, error) {
+		// Try each provider in order of preference
+		var lastErr error
+		var usedProviders []string
 
-	start := time.Now()
-	err = breaker.Execute(func() error {
-		return op(provider)
-	})
-	m.requestLatency.WithLabelValues(name).Observe(time.Since(start).Seconds())
+		// Get the provider preference list under a read lock
+		m.mu.RLock()
+		preference := make([]string, len(m.cfg.ProviderPreference))
+		copy(preference, m.cfg.ProviderPreference)
+		m.mu.RUnlock()
 
-	// If all providers are failing, wrap with ErrNoHealthyProvider
-	if err != nil {
-		allFailing := true
-		for _, b := range m.breakers {
-			if b.GetState() != circuitbreaker.StateOpen {
-				allFailing = false
-				break
+		m.logger.Debug("provider preference list", zap.Strings("preference", preference))
+
+		// First try providers that are healthy
+		for _, name := range preference {
+			provider, exists := m.providers[name]
+			if !exists {
+				m.logger.Debug("provider does not exist", zap.String("provider", name))
+				continue
 			}
+
+			// Skip if we've already tried this provider
+			if contains(usedProviders, name) {
+				m.logger.Debug("provider already tried", zap.String("provider", name))
+				continue
+			}
+			usedProviders = append(usedProviders, name)
+
+			// Get health status and circuit breaker state under a read lock
+			m.mu.RLock()
+			status := m.GetHealthStatus(name)
+			breaker := m.breakers[name]
+			m.mu.RUnlock()
+
+			m.logger.Debug("checking provider",
+				zap.String("provider", name),
+				zap.Bool("healthy", status.Healthy),
+				zap.Int64("error_count", status.ErrorCount),
+				zap.Time("last_check", status.LastCheck),
+				zap.String("state", breaker.GetState().String()),
+			)
+
+			// Skip if provider is unhealthy
+			if !status.Healthy {
+				m.logger.Debug("provider is unhealthy", zap.String("provider", name), zap.Int64("consecutive_fails", status.ErrorCount))
+				continue
+			}
+
+			// Skip if circuit breaker is open
+			if breaker != nil {
+				state := breaker.GetState()
+				if state == circuitbreaker.StateOpen {
+					m.logger.Debug("circuit breaker is open", zap.String("provider", name))
+					continue
+				}
+			}
+
+			m.logger.Debug("selected provider", zap.String("provider", name))
+
+			// Execute the operation with circuit breaker
+			err := breaker.Execute(func() error {
+				return operation(provider)
+			})
+
+			if err != nil {
+				lastErr = err
+				m.logger.Debug("operation failed, checking for other providers", zap.String("provider", name), zap.Error(err))
+
+				// Update health status
+				m.mu.Lock()
+				status := m.GetHealthStatus(name)
+				status.ErrorCount++
+				status.Healthy = false
+				status.LastCheck = time.Now()
+				m.UpdateHealthStatus(name, status)
+				m.mu.Unlock()
+
+				continue
+			}
+
+			// Operation succeeded, update health status
+			m.mu.Lock()
+			m.UpdateHealthStatus(name, HealthStatus{
+				Healthy:    true,
+				LastCheck:  time.Now(),
+				ErrorCount: 0,
+			})
+			m.mu.Unlock()
+
+			m.logger.Debug("operation succeeded", zap.String("provider", name))
+			return nil, nil
 		}
-		if allFailing {
-			return fmt.Errorf("%w: %v", ErrNoHealthyProvider, err)
+
+		// If we get here, all providers failed or were unhealthy
+		if lastErr != nil {
+			m.logger.Debug("no healthy providers available after failure", zap.String("provider", usedProviders[len(usedProviders)-1]), zap.Error(lastErr))
+		} else {
+			m.logger.Debug("no healthy providers available")
 		}
+
+		return nil, fmt.Errorf("no healthy provider available")
+	}); err != nil {
+		m.logger.Debug("Execute failed", zap.Error(err))
+		return err
+	} else if shared {
+		m.deduplicatedRequests.Inc()
+		m.logger.Debug("request deduplicated")
 	}
 
-	return err
+	m.logger.Debug("Execute completed successfully")
+	return nil
 }
 
 // getProviderName returns the name of a provider instance
@@ -341,32 +511,108 @@ func (m *Manager) SetProviders(providers map[string]gollm.LLM) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.providers = providers
+	// Clear existing providers and breakers
+	m.providers = make(map[string]gollm.LLM)
+	m.breakers = make(map[string]*circuitbreaker.CircuitBreaker)
 
-	// Create circuit breaker config
-	cbConfig := circuitbreaker.Config{
-		FailureThreshold:  3,           // Trip after 3 failures
-		ResetTimeout:     m.cfg.CircuitBreaker.ResetTimeout,  // Use configured timeout
-		HalfOpenRequests: 1,           // Allow 1 request in half-open state
-		TestMode:        false,        // Enable metrics in SetProviders
-	}
+	// Set up new providers
+	for name, provider := range providers {
+		m.providers[name] = provider
 
-	if cbConfig.ResetTimeout == 0 {
-		cbConfig.ResetTimeout = time.Minute // Default to 1 minute
-	}
-
-	// Initialize circuit breakers
-	for name := range providers {
-		m.breakers[name] = circuitbreaker.NewCircuitBreaker(
+		// Create circuit breaker for provider
+		breaker := circuitbreaker.NewCircuitBreaker(
 			name,
-			cbConfig,
-			m.logger.With(zap.String("provider", name)),
-			m.registry, // Use the same registry as the manager
+			circuitbreaker.Config{
+				FailureThreshold:  2,
+				ResetTimeout:     m.cfg.CircuitBreaker.ResetTimeout,
+				HalfOpenRequests: 1,
+				TestMode:        m.cfg.CircuitBreaker.TestMode,
+			},
+			m.logger,
+			m.registry,
 		)
+
+		// Set callback to update health status when circuit breaker state changes
+		breaker.SetStateChangeCallback(func(state circuitbreaker.State) {
+			if state == circuitbreaker.StateOpen {
+				m.UpdateHealthStatus(name, HealthStatus{
+					Healthy:    false,
+					LastCheck:  time.Now(),
+					ErrorCount: 2,
+				})
+			}
+		})
+
+		m.breakers[name] = breaker
+
+		// Initialize health status
+		m.UpdateHealthStatus(name, HealthStatus{
+			Healthy:    true,
+			LastCheck:  time.Now(),
+			ErrorCount: 0,
+		})
 	}
+
+	// Create a map to track which providers have been added to the preference list
+	added := make(map[string]bool)
+
+	// Keep existing provider preference order for providers that still exist
+	newPreference := make([]string, 0, len(providers))
+	for _, name := range m.cfg.ProviderPreference {
+		if _, exists := providers[name]; exists {
+			newPreference = append(newPreference, name)
+			added[name] = true
+		}
+	}
+
+	// Add any new providers that weren't in the original preference list
+	for name := range providers {
+		if !added[name] {
+			newPreference = append(newPreference, name)
+		}
+	}
+
+	// Sort the new preference list to ensure a consistent order
+	sort.Strings(newPreference)
+
+	m.cfg.ProviderPreference = newPreference
+	m.logger.Debug("updated provider preference list", zap.Strings("preference", newPreference))
 }
 
 // GetHealthCheckErrors returns the health check errors counter for testing
 func (m *Manager) GetHealthCheckErrors() *prometheus.CounterVec {
 	return m.healthCheckErrors
+}
+
+// GetHealthStatus returns the health status for a provider
+func (m *Manager) GetHealthStatus(name string) HealthStatus {
+	if val, ok := m.healthStates.Load(name); ok {
+		return val.(HealthStatus)
+	}
+	return HealthStatus{}
+}
+
+func contains(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *Manager) healthCheck(provider gollm.LLM) error {
+	// Simple health check prompt
+	prompt := &gollm.Prompt{
+		Messages: []gollm.PromptMessage{
+			{Role: "user", Content: "health check"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := provider.Generate(ctx, prompt)
+	return err
 }

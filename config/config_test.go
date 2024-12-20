@@ -31,8 +31,10 @@ logging:
 routes:
   - path: /v1/completions
     handler: completion
+    version: v1
   - path: /health
     handler: health
+    version: v1
 `
 
 	config, err := Load(strings.NewReader(yamlConfig))

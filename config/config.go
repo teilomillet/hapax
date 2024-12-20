@@ -231,6 +231,7 @@ type HealthCheck struct {
 // CircuitBreakerConfig holds circuit breaker settings
 type CircuitBreakerConfig struct {
 	ResetTimeout time.Duration `yaml:"reset_timeout"`
+	TestMode     bool          `yaml:"test_mode"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults
@@ -244,8 +245,8 @@ func DefaultConfig() *Config {
 			ShutdownTimeout: 30 * time.Second,
 		},
 		LLM: LLMConfig{
-			Provider: "openai",
-			Model:    "gpt-4o-mini",
+			Provider: "ollama",
+			Model:    "llama2",
 			HealthCheck: &ProviderHealthCheck{
 				Enabled:          true,
 				Interval:         30 * time.Second,
@@ -269,6 +270,18 @@ func DefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
+		},
+		Routes: []RouteConfig{
+			{
+				Path:    "/v1/completions",
+				Handler: "completion",
+				Version: "v1",
+			},
+			{
+				Path:    "/health",
+				Handler: "health",
+				Version: "v1",
+			},
 		},
 	}
 }

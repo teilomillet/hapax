@@ -27,4 +27,4 @@ go.work.sum
 # Config files
 config.yaml
 
-hapax
+/hapax
