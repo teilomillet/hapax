@@ -224,6 +224,43 @@ Error types include:
 - `rate_limit_error`: Rate limiting
 - `internal_error`: Unexpected server errors
 
+## Docker Support
+
+The application comes with full Docker support, making it easy to deploy and run in containerized environments.
+
+### Features
+
+- **Multi-stage Build**: Optimized container size with separate build and runtime stages
+- **Security**: Runs as non-root user with minimal runtime dependencies
+- **Health Checks**: Built-in health monitoring for container orchestration
+- **Prometheus Integration**: Ready-to-use metrics endpoint for monitoring
+- **Docker Compose**: Complete setup with Prometheus integration
+
+### Running with Docker
+
+1. Build and run using Docker:
+```bash
+docker build -t hapax .
+docker run -p 8080:8080 hapax
+```
+
+2. Or use Docker Compose for the full stack with Prometheus:
+```bash
+docker compose up -d
+```
+
+### Container Health
+
+The container includes health checks that monitor:
+- HTTP server availability
+- Application readiness
+- Basic functionality
+
+Access the health status:
+- Health endpoint: http://localhost:8080/health
+- Metrics endpoint: http://localhost:8080/metrics
+- Prometheus: http://localhost:9090
+
 ## Testing
 
 The project includes a comprehensive test suite with a mock LLM implementation that can be used for testing LLM-dependent code:
