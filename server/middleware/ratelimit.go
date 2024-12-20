@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/metrics"
 	"golang.org/x/time/rate"
 )
 
@@ -34,45 +35,48 @@ func (l *rateLimiters) GetOrCreate(ip string, create func() *rate.Limiter) *rate
 	return limiter
 }
 
-// RateLimit middleware implements rate limiting per IP address
-func RateLimit(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get IP address from request
-		ip := r.RemoteAddr
-		if idx := strings.LastIndex(ip, ":"); idx != -1 {
-			ip = ip[:idx] // Strip port number if present
-		}
-		
-		// Get rate limiter for this IP
-		limiter := limiters.GetOrCreate(ip, func() *rate.Limiter {
-			return rate.NewLimiter(rate.Every(time.Minute), 10)
-		})
+// RateLimit creates a new rate limit middleware with metrics
+func RateLimit(metrics *metrics.Metrics) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get IP address from request
+			ip := r.RemoteAddr
+			if idx := strings.LastIndex(ip, ":"); idx != -1 {
+				ip = ip[:idx] // Strip port number if present
+			}
+			
+			// Get rate limiter for this IP
+			limiter := limiters.GetOrCreate(ip, func() *rate.Limiter {
+				return rate.NewLimiter(rate.Every(time.Minute), 10)
+			})
 
-		// Try to allow request
-		if !limiter.Allow() {
-			var requestID string
-			if id := r.Context().Value("request_id"); id != nil {
-				requestID = id.(string)
+			// Try to allow request
+			if !limiter.Allow() {
+				metrics.RateLimitHits.WithLabelValues(ip).Inc()
+				var requestID string
+				if id := r.Context().Value("request_id"); id != nil {
+					requestID = id.(string)
+				}
+
+				errResp := errors.NewError(
+					errors.RateLimitError,
+					"Rate limit exceeded",
+					http.StatusTooManyRequests,
+					requestID,
+					map[string]interface{}{
+						"limit":  int64(10), // Use int64 to ensure it's not converted to float64
+						"window": "1m0s",
+					},
+					nil,
+				)
+
+				errors.WriteError(w, errResp)
+				return
 			}
 
-			errResp := errors.NewError(
-				errors.RateLimitError,
-				"Rate limit exceeded",
-				http.StatusTooManyRequests,
-				requestID,
-				map[string]interface{}{
-					"limit":  int64(10), // Use int64 to ensure it's not converted to float64
-					"window": "1m0s",
-				},
-				nil,
-			)
-
-			errors.WriteError(w, errResp)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // ResetRateLimiters resets all rate limiters. Only used for testing.
