@@ -25,6 +25,8 @@ import (
 type MockLLM struct {
 	GenerateFunc func(context.Context, *gollm.Prompt) (string, error)
 	DebugFunc   func(string, ...interface{})
+	Provider    string // Provider name for testing
+	Model       string // Model name for testing
 }
 
 // NewMockLLM creates a new MockLLM with optional generate function.
@@ -32,6 +34,17 @@ type MockLLM struct {
 func NewMockLLM(generateFunc func(context.Context, *gollm.Prompt) (string, error)) *MockLLM {
 	return &MockLLM{
 		GenerateFunc: generateFunc,
+		Provider:    "mock",
+		Model:       "mock-model",
+	}
+}
+
+// NewMockLLMWithConfig creates a new MockLLM with specific provider and model names
+func NewMockLLMWithConfig(provider, model string, generateFunc func(context.Context, *gollm.Prompt) (string, error)) *MockLLM {
+	return &MockLLM{
+		GenerateFunc: generateFunc,
+		Provider:    provider,
+		Model:       model,
 	}
 }
 
@@ -66,16 +79,14 @@ func (m *MockLLM) GetPromptJSONSchema(opts ...gollm.SchemaOption) ([]byte, error
 	return []byte(`{}`), nil
 }
 
-// GetProvider returns a mock provider name.
-// This helps identify mock instances in logs and debugging.
+// GetProvider returns the mock provider name
 func (m *MockLLM) GetProvider() string {
-	return "mock"
+	return m.Provider
 }
 
-// GetModel returns a mock model name.
-// This helps identify mock instances in logs and debugging.
+// GetModel returns the mock model name
 func (m *MockLLM) GetModel() string {
-	return "mock-model"
+	return m.Model
 }
 
 // GetLogLevel returns a default log level.

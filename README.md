@@ -34,23 +34,12 @@ v0.0.7
   - Route-specific middleware
   - Health check endpoints
   - Header validation
-- Configurable server settings (port, timeouts, etc.)
-- Comprehensive test suite with mock LLM implementation
-- Token validation with tiktoken
-  - Automatic token counting
-  - Context length validation
-  - Max tokens validation
-- Middleware architecture:
-  - Request ID tracking
-  - Request timing metrics
-  - Panic recovery
-  - CORS support
-- Enhanced error handling:
-  - Structured JSON error responses
-  - Request ID tracking in errors
-  - Zap-based logging with context
-  - Custom error types for different scenarios
-  - Seamless error middleware integration
+- Provider management:
+  - Multiple provider support (OpenAI, Anthropic, etc.)
+  - Provider health monitoring
+  - Automatic failover to backup providers
+  - Configurable health check intervals
+  - Provider-specific configuration
 
 ## Installation
 

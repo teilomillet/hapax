@@ -28,11 +28,11 @@ Focus: Build a reliable, production-ready gateway server leveraging gollm's capa
   - Dynamic routing based on request properties
   - Version management (v1, v2, etc.)
   - Health check endpoints
-- [ ] Request processing
+- [x] Request processing
   - Request transformation
   - Response formatting
   - Streaming support
-- [ ] Provider management
+- [x] Provider management
   - Provider configuration
   - Provider health monitoring
   - Failover handling

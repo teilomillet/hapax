@@ -18,7 +18,7 @@ import (
 // and route definitions into a single, cohesive configuration structure.
 type Config struct {
 	Server  ServerConfig  `yaml:"server"`
-	LLM     LLMConfig    `yaml:"llm"`
+	LLM     LLMConfig     `yaml:"llm"`
 	Logging LoggingConfig `yaml:"logging"`
 	Routes  []RouteConfig `yaml:"routes"`
 }
@@ -62,16 +62,15 @@ type LLMConfig struct {
 
 	// Endpoint is the API endpoint URL
 	// For Ollama, this is typically "http://localhost:11434"
-	// For OpenAI/Anthropic, this is their respective API endpoints
 	Endpoint string `yaml:"endpoint"`
 
-	// SystemPrompt is the default system message for all conversations
+	// SystemPrompt is the default system prompt to use
 	SystemPrompt string `yaml:"system_prompt"`
 
-	// MaxContextTokens specifies the maximum combined tokens (input + output)
-	// This is model-dependent:
-	// - GPT-4 Turbo: 128,000 tokens
-	// - Claude-3-Haiku: 200,000 tokens
+	// MaxContextTokens is the maximum number of tokens in the context window
+	// This varies by model:
+	// - GPT-4: 8192 or 32768
+	// - Claude: 100k
 	// - Llama2: Varies by version
 	MaxContextTokens int `yaml:"max_context_tokens"`
 
@@ -83,6 +82,27 @@ type LLMConfig struct {
 
 	// Options contains provider-specific generation parameters
 	Options map[string]interface{} `yaml:"options"`
+
+	// BackupProviders defines failover providers (optional)
+	BackupProviders []BackupProvider `yaml:"backup_providers,omitempty"`
+
+	// HealthCheck defines provider health monitoring settings (optional)
+	HealthCheck *ProviderHealthCheck `yaml:"health_check,omitempty"`
+}
+
+// BackupProvider defines a fallback LLM provider
+type BackupProvider struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	APIKey   string `yaml:"api_key"`
+}
+
+// ProviderHealthCheck defines health check settings
+type ProviderHealthCheck struct {
+	Enabled          bool          `yaml:"enabled"`
+	Interval         time.Duration `yaml:"interval"`
+	Timeout          time.Duration `yaml:"timeout"`
+	FailureThreshold int           `yaml:"failure_threshold"`
 }
 
 // CacheConfig defines caching behavior for LLM responses.
@@ -208,22 +228,31 @@ func DefaultConfig() *Config {
 			ShutdownTimeout: 30 * time.Second,
 		},
 		LLM: LLMConfig{
-			Provider:         "ollama",
-			Model:            "llama2",
-			Endpoint:         "http://localhost:11434",
-			MaxContextTokens: 2048,
-			Options: map[string]interface{}{
-				"temperature": 0.7,
-				"max_tokens": 2000,
+			Provider: "openai",
+			Model:    "gpt-4o-mini",
+			HealthCheck: &ProviderHealthCheck{
+				Enabled:          true,
+				Interval:         30 * time.Second,
+				Timeout:          5 * time.Second,
+				FailureThreshold: 3,
+			},
+			Cache: &CacheConfig{
+				Enable:  false,
+				Type:    "memory",
+				TTL:     24 * time.Hour,
+				MaxSize: 1 << 30, // 1GB
+			},
+			Retry: &RetryConfig{
+				MaxRetries:      3,
+				InitialDelay:    100 * time.Millisecond,
+				MaxDelay:        2 * time.Second,
+				Multiplier:      2.0,
+				RetryableErrors: []string{"rate_limit", "timeout", "server_error"},
 			},
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
-		},
-		Routes: []RouteConfig{
-			{Path: "/v1/completions", Handler: "completion", Version: "v1"},
-			{Path: "/health", Handler: "health", Version: "v1"},
 		},
 	}
 }
