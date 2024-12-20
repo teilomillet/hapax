@@ -35,7 +35,7 @@ WORKDIR /app
 COPY --from=builder /app/hapax .
 
 # Copy default config file
-COPY config.yaml ./config.yaml
+COPY config.example.yaml ./config.yaml
 
 # Use non-root user
 USER hapax

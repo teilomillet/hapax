@@ -2,15 +2,34 @@ server:
   port: 8080
   read_timeout: 30s
   write_timeout: 30s
+  max_header_bytes: 1048576
+  shutdown_timeout: 5s
 
-llm:
-  provider: "ollama"  # Change to your preferred provider (ollama, openai, etc.)
-  model: "llama2"     # Change to your preferred model
-  endpoint: ""        # Set your provider's endpoint if needed
+providers:
+  openai:
+    type: openai
+    model: gpt-4
+    api_key: ${OPENAI_API_KEY}
+  anthropic:
+    type: anthropic
+    model: claude-2
+    api_key: ${ANTHROPIC_API_KEY}
+  ollama:
+    type: ollama
+    model: llama2
+    api_key: ""
+
+# Order of provider preference for failover
+provider_preference:
+  - openai
+  - anthropic
+  - ollama
 
 logging:
-  level: "info"
-  format: "json"
+  level: info
+  format: json
 
 metrics:
   enabled: true
+  prometheus:
+    enabled: true

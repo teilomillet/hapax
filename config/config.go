@@ -21,6 +21,9 @@ type Config struct {
 	LLM     LLMConfig     `yaml:"llm"`
 	Logging LoggingConfig `yaml:"logging"`
 	Routes  []RouteConfig `yaml:"routes"`
+	Providers map[string]ProviderConfig `yaml:"providers"`
+	ProviderPreference []string `yaml:"provider_preference"` // Order of provider preference
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
 }
 
 // ServerConfig holds server-specific configuration for the HTTP server.
@@ -166,6 +169,13 @@ type RetryConfig struct {
 	RetryableErrors []string `yaml:"retryable_errors"`
 }
 
+// ProviderConfig holds configuration for an LLM provider
+type ProviderConfig struct {
+	Type  string `yaml:"type"`  // Provider type (e.g., openai, anthropic)
+	Model string `yaml:"model"` // Model name
+	APIKey string `yaml:"api_key"`  // API key for authentication
+}
+
 // LoggingConfig holds logging-specific configuration.
 type LoggingConfig struct {
 	// Level sets logging verbosity: debug, info, warn, error
@@ -215,6 +225,11 @@ type HealthCheck struct {
 
 	// Checks specifies the map of check name to check type
 	Checks map[string]string `yaml:"checks"`
+}
+
+// CircuitBreakerConfig holds circuit breaker settings
+type CircuitBreakerConfig struct {
+	ResetTimeout time.Duration `yaml:"reset_timeout"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults
