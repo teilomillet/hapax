@@ -11,12 +11,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/metrics"
 	"github.com/teilomillet/hapax/server/middleware"
-	"github.com/teilomillet/hapax/server/mocks"
 	"github.com/teilomillet/hapax/server/processing"
+	"github.com/teilomillet/gollm"
+	"github.com/teilomillet/hapax/server/mocks"
 	"go.uber.org/zap"
 )
 
@@ -26,6 +27,9 @@ import (
 // - Error handling middleware
 // - Logging middleware
 func TestCompletionHandlerIntegration(t *testing.T) {
+	// Create metrics
+	m := metrics.NewMetrics()
+
 	// Create mock LLM
 	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
 		// If context has timeout header, simulate timeout
@@ -53,17 +57,17 @@ func TestCompletionHandlerIntegration(t *testing.T) {
 	// Create handler
 	handler := NewCompletionHandler(processor, logger)
 
-	// Create test server with middleware chain
-	// Order: RequestID -> RateLimit -> Timeout -> Handler
-	ts := httptest.NewServer(
-		middleware.RequestID(
-			middleware.RateLimit(
-				middleware.Timeout(5 * time.Second)(
-					handler,
-				),
+	// Create middleware chain
+	chain := middleware.RequestID(
+		middleware.PrometheusMetrics(m)(
+			middleware.RateLimit(m)(
+				middleware.Timeout(5*time.Second)(handler),
 			),
 		),
 	)
+
+	// Create test server
+	ts := httptest.NewServer(chain)
 	defer ts.Close()
 
 	tests := []struct {
