@@ -10,10 +10,48 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/teilomillet/hapax/config"
+	"github.com/teilomillet/hapax/server/metrics"
 	"go.uber.org/zap"
 )
 
-// TestRouter_NewRouter tests the creation of a new router
+func setupTestRouter(t *testing.T) (*Router, *httptest.Server) {
+	// Create logger
+	logger, _ := zap.NewDevelopment()
+
+	// Create metrics
+	m := metrics.NewMetrics()
+
+	// Create test handler
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create handlers map
+	handlers := map[string]http.Handler{
+		"test": handler,
+	}
+
+	// Create config
+	cfg := &config.Config{
+		Routes: []config.RouteConfig{
+			{
+				Path:    "/test",
+				Handler: "test",
+				Version: "v1",
+				Methods: []string{"GET"},
+			},
+		},
+	}
+
+	// Create router
+	router := NewRouter(cfg, handlers, logger, m)
+
+	// Create test server
+	server := httptest.NewServer(router)
+
+	return router, server
+}
+
 func TestRouter_NewRouter(t *testing.T) {
 	// Setup
 	cfg := &config.Config{
@@ -31,9 +69,10 @@ func TestRouter_NewRouter(t *testing.T) {
 		}),
 	}
 	logger := zap.NewNop()
+	m := metrics.NewMetrics()
 
 	// Test
-	router := NewRouter(cfg, handlers, logger)
+	router := NewRouter(cfg, handlers, logger, m)
 
 	// Assert
 	assert.NotNil(t, router)
@@ -41,7 +80,6 @@ func TestRouter_NewRouter(t *testing.T) {
 	assert.Equal(t, handlers, router.handlers)
 }
 
-// TestRouter_VersionedRouting tests that versioned routes are properly handled
 func TestRouter_VersionedRouting(t *testing.T) {
 	// Setup
 	cfg := &config.Config{
@@ -66,7 +104,9 @@ func TestRouter_VersionedRouting(t *testing.T) {
 			w.Write([]byte("v2"))
 		}),
 	}
-	router := NewRouter(cfg, handlers, zap.NewNop())
+	logger := zap.NewNop()
+	m := metrics.NewMetrics()
+	router := NewRouter(cfg, handlers, logger, m)
 
 	// Test V1
 	req := httptest.NewRequest("GET", "/v1/test", nil)
@@ -81,7 +121,6 @@ func TestRouter_VersionedRouting(t *testing.T) {
 	assert.Equal(t, "v2", w.Body.String())
 }
 
-// TestRouter_HeaderValidation tests that header validation works correctly
 func TestRouter_HeaderValidation(t *testing.T) {
 	// Setup
 	cfg := &config.Config{
@@ -101,7 +140,9 @@ func TestRouter_HeaderValidation(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}),
 	}
-	router := NewRouter(cfg, handlers, zap.NewNop())
+	logger := zap.NewNop()
+	m := metrics.NewMetrics()
+	router := NewRouter(cfg, handlers, logger, m)
 
 	// Test without required header
 	req := httptest.NewRequest("GET", "/v1/test", nil)
@@ -117,7 +158,6 @@ func TestRouter_HeaderValidation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-// TestRouter_MethodRestriction tests that method restrictions are enforced
 func TestRouter_MethodRestriction(t *testing.T) {
 	// Setup
 	cfg := &config.Config{
@@ -135,7 +175,9 @@ func TestRouter_MethodRestriction(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}),
 	}
-	router := NewRouter(cfg, handlers, zap.NewNop())
+	logger := zap.NewNop()
+	m := metrics.NewMetrics()
+	router := NewRouter(cfg, handlers, logger, m)
 
 	// Test with wrong method
 	req := httptest.NewRequest("GET", "/v1/test", nil)
@@ -150,7 +192,6 @@ func TestRouter_MethodRestriction(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-// TestRouter_HealthCheck tests the health check functionality
 func TestRouter_HealthCheck(t *testing.T) {
 	// Setup
 	cfg := &config.Config{
@@ -179,7 +220,9 @@ func TestRouter_HealthCheck(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}),
 	}
-	router := NewRouter(cfg, handlers, zap.NewNop())
+	logger := zap.NewNop()
+	m := metrics.NewMetrics()
+	router := NewRouter(cfg, handlers, logger, m)
 
 	// Test route health check
 	req := httptest.NewRequest("GET", "/v1/test/health", nil)
@@ -210,7 +253,6 @@ func TestRouter_HealthCheck(t *testing.T) {
 	assert.NotEmpty(t, globalResp.Services)
 }
 
-// TestRouter_Middleware tests that middleware is properly applied
 func TestRouter_Middleware(t *testing.T) {
 	// Setup
 	middlewareCalled := false
@@ -242,11 +284,14 @@ func TestRouter_Middleware(t *testing.T) {
 		}),
 	}
 
+	logger := zap.NewNop()
+	m := metrics.NewMetrics()
 	router := &Router{
 		router:   r,
 		handlers: handlers,
-		logger:   zap.NewNop(),
+		logger:   logger,
 		cfg:      cfg,
+		metrics:  m,
 	}
 	router.setupRoutes()
 
@@ -258,4 +303,32 @@ func TestRouter_Middleware(t *testing.T) {
 	// Assert
 	assert.True(t, middlewareCalled)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRouterBasic(t *testing.T) {
+	_, server := setupTestRouter(t)
+	defer server.Close()
+
+	// Test valid endpoint
+	resp, err := http.Get(server.URL + "/v1/test")
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
+
+	// Test invalid endpoint
+	resp, err = http.Get(server.URL + "/invalid")
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	resp.Body.Close()
+}
+
+func TestRouterMetrics(t *testing.T) {
+	_, server := setupTestRouter(t)
+	defer server.Close()
+
+	// Test metrics endpoint
+	resp, err := http.Get(server.URL + "/metrics")
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
 }

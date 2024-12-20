@@ -1,4 +1,4 @@
-package middleware
+package middleware_test
 
 import (
 	"net/http"
@@ -6,11 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/teilomillet/hapax/server/metrics"
+	"github.com/teilomillet/hapax/server/middleware"
 )
 
 func TestRequestID(t *testing.T) {
-	handler := RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Handler should see request ID in context
 		requestID := r.Context().Value("request_id").(string)
 		assert.NotEmpty(t, requestID)
@@ -43,7 +46,7 @@ func TestRequestID(t *testing.T) {
 }
 
 func TestRequestTimer(t *testing.T) {
-	handler := RequestTimer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.RequestTimer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(10 * time.Millisecond) // Simulate some work
 	}))
 
@@ -61,7 +64,7 @@ func TestRequestTimer(t *testing.T) {
 }
 
 func TestPanicRecovery(t *testing.T) {
-	handler := PanicRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware.PanicRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("test panic")
 	}))
 
@@ -104,7 +107,7 @@ func TestCORS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler := CORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := middleware.CORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 
@@ -122,87 +125,84 @@ func TestCORS(t *testing.T) {
 }
 
 func TestAuthentication(t *testing.T) {
-	tests := []struct {
-		name           string
-		apiKey         string
-		expectedStatus int
-	}{
-		{
-			name:           "valid API key",
-			apiKey:         "test-key",
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "missing API key",
-			apiKey:         "",
-			expectedStatus: http.StatusUnauthorized,
-		},
-	}
+	// Create test handler
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := middleware.Authentication(nextHandler)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			handler := Authentication(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
+	// Test without auth header
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 
-			req := httptest.NewRequest("GET", "/", nil)
-			if tt.apiKey != "" {
-				req.Header.Set("X-API-Key", tt.apiKey)
-			}
+	// Test with invalid auth header
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "invalid")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
+	// Test with valid auth header
+	req = httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
 
-			assert.Equal(t, tt.expectedStatus, rec.Code)
-		})
-	}
+func TestTimeout(t *testing.T) {
+	// Create test handler that sleeps
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := middleware.Timeout(1 * time.Second)(nextHandler)
+
+	// Test timeout
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusGatewayTimeout, w.Code)
+
+	// Test success (no timeout)
+	nextHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler = middleware.Timeout(1 * time.Second)(nextHandler)
+	req = httptest.NewRequest("GET", "/", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestRateLimit(t *testing.T) {
-	handler := RateLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Reset metrics registry
+	prometheus.DefaultRegisterer = prometheus.NewRegistry()
+
+	// Create metrics
+	m := metrics.NewMetrics()
+
+	// Create test handler
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
-
-	// Test normal request flow
-	t.Run("allows requests within limit", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	// Test rate limiting
-	t.Run("blocks excessive requests", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "192.168.1.1:12345" // Use specific IP for this test
+	// Create middleware handler
+	handler := middleware.RateLimit(m)(nextHandler)
 
-		// Make many requests in quick succession
-		var lastStatus int
-		for i := 0; i < 30; i++ {
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-			lastStatus = rec.Code
-			if lastStatus == http.StatusTooManyRequests {
-				break
-			}
+	// Test rate limit
+	for i := 0; i < 11; i++ {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if i < 10 {
+			assert.Equal(t, http.StatusOK, w.Code)
+		} else {
+			assert.Equal(t, http.StatusTooManyRequests, w.Code)
 		}
-
-		assert.Equal(t, http.StatusTooManyRequests, lastStatus)
-	})
-
-	// Test rate limit reset
-	t.Run("allows requests after cooldown", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "192.168.1.2:12345" // Use different IP
-
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-
-		time.Sleep(time.Second) // Wait for rate limit to reset
-
-		rec = httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-	})
+	}
 }
