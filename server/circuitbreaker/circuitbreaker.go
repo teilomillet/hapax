@@ -22,6 +22,7 @@ type Config struct {
 	FailureThreshold    int           // Number of failures before opening circuit
 	ResetTimeout       time.Duration  // Time to wait before attempting reset
 	HalfOpenRequests   int           // Number of requests to allow in half-open state
+	TestMode          bool           // Skip metric registration in test mode
 }
 
 // CircuitBreaker implements the circuit breaker pattern
@@ -75,10 +76,12 @@ func NewCircuitBreaker(name string, config Config, logger *zap.Logger, registry 
 		},
 	})
 
-	// Register metrics with Prometheus
-	registry.MustRegister(cb.stateGauge)
-	registry.MustRegister(cb.failuresCount)
-	registry.MustRegister(cb.tripsTotal)
+	// Register metrics with Prometheus if not in test mode
+	if !config.TestMode && registry != nil {
+		registry.MustRegister(cb.stateGauge)
+		registry.MustRegister(cb.failuresCount)
+		registry.MustRegister(cb.tripsTotal)
+	}
 
 	return cb
 }

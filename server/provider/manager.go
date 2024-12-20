@@ -15,12 +15,12 @@ import (
 
 // HealthStatus represents the current health state of a provider
 type HealthStatus struct {
-	Healthy          bool
-	LastCheck        time.Time
-	ConsecutiveFails int
-	Latency         time.Duration
-	ErrorCount      int64
-	RequestCount    int64
+	Healthy          bool      // Whether the provider is currently healthy
+	LastCheck        time.Time // When the last health check was performed
+	ConsecutiveFails int       // Number of consecutive failures
+	Latency         time.Duration // Last observed latency
+	ErrorCount      int64      // Total number of errors
+	RequestCount    int64      // Total number of requests
 }
 
 // Manager handles LLM provider management and selection
@@ -33,6 +33,7 @@ type Manager struct {
 	mu           sync.RWMutex
 
 	// Metrics
+	registry           *prometheus.Registry
 	healthCheckDuration prometheus.Histogram
 	healthCheckErrors   *prometheus.CounterVec
 	requestLatency     *prometheus.HistogramVec
@@ -45,6 +46,7 @@ func NewManager(cfg *config.Config, logger *zap.Logger, registry *prometheus.Reg
 		breakers:  make(map[string]*circuitbreaker.CircuitBreaker),
 		logger:    logger,
 		cfg:       cfg,
+		registry:  registry,
 	}
 
 	// Initialize metrics
@@ -62,8 +64,10 @@ func NewManager(cfg *config.Config, logger *zap.Logger, registry *prometheus.Reg
 	}
 
 	// Initialize providers from both new and legacy configs
-	if err := m.initializeProviders(cbConfig, registry); err != nil {
-		return nil, err
+	if !cfg.TestMode {
+		if err := m.initializeProviders(cbConfig, registry); err != nil {
+			return nil, err
+		}
 	}
 
 	// Start health checks if enabled
@@ -77,17 +81,17 @@ func NewManager(cfg *config.Config, logger *zap.Logger, registry *prometheus.Reg
 // initializeMetrics sets up Prometheus metrics
 func (m *Manager) initializeMetrics(registry *prometheus.Registry) {
 	m.healthCheckDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name: "hapax_provider_health_check_duration_seconds",
+		Name: "hapax_health_check_duration_seconds",
 		Help: "Duration of provider health checks",
 	})
 
 	m.healthCheckErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "hapax_provider_health_check_errors_total",
+		Name: "hapax_health_check_errors_total",
 		Help: "Number of health check errors by provider",
 	}, []string{"provider"})
 
 	m.requestLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name: "hapax_provider_request_latency_seconds",
+		Name: "hapax_request_latency_seconds",
 		Help: "Latency of provider requests",
 	}, []string{"provider"})
 
@@ -191,12 +195,25 @@ func (m *Manager) checkAllProviders() {
 	}
 }
 
+// CheckProviderHealth performs a health check on a provider
+func (m *Manager) CheckProviderHealth(name string, llm gollm.LLM) HealthStatus {
+	return m.checkProviderHealth(name, llm)
+}
+
 // checkProviderHealth performs a health check on a provider
 func (m *Manager) checkProviderHealth(name string, llm gollm.LLM) HealthStatus {
 	start := time.Now()
 	status := HealthStatus{
 		LastCheck: start,
 		Healthy:   true,
+	}
+
+	// Get previous status if any
+	if val, ok := m.healthStates.Load(name); ok {
+		prevStatus := val.(HealthStatus)
+		status.ConsecutiveFails = prevStatus.ConsecutiveFails
+		status.ErrorCount = prevStatus.ErrorCount
+		status.RequestCount = prevStatus.RequestCount
 	}
 
 	// Simple health check prompt
@@ -215,6 +232,7 @@ func (m *Manager) checkProviderHealth(name string, llm gollm.LLM) HealthStatus {
 
 	if err != nil {
 		status.Healthy = false
+		status.ConsecutiveFails++
 		status.ErrorCount++
 		m.healthCheckErrors.WithLabelValues(name).Inc()
 		m.logger.Warn("Provider health check failed",
@@ -222,9 +240,17 @@ func (m *Manager) checkProviderHealth(name string, llm gollm.LLM) HealthStatus {
 			zap.Error(err),
 			zap.Duration("latency", status.Latency),
 		)
+	} else {
+		status.ConsecutiveFails = 0
 	}
 
+	status.RequestCount++
 	return status
+}
+
+// UpdateHealthStatus updates the health status for a provider
+func (m *Manager) UpdateHealthStatus(name string, status HealthStatus) {
+	m.updateHealthStatus(name, status)
 }
 
 // updateHealthStatus updates the health status for a provider
@@ -244,10 +270,21 @@ func (m *Manager) GetProvider() (gollm.LLM, error) {
 			continue
 		}
 
+		// Check circuit breaker state
 		breaker := m.breakers[name]
-		if breaker.AllowRequest() {
-			return provider, nil
+		if !breaker.AllowRequest() {
+			continue
 		}
+
+		// Check health status
+		if val, ok := m.healthStates.Load(name); ok {
+			status := val.(HealthStatus)
+			if !status.Healthy {
+				continue
+			}
+		}
+
+		return provider, nil
 	}
 
 	return nil, ErrNoHealthyProvider
@@ -305,4 +342,31 @@ func (m *Manager) SetProviders(providers map[string]gollm.LLM) {
 	defer m.mu.Unlock()
 
 	m.providers = providers
+
+	// Create circuit breaker config
+	cbConfig := circuitbreaker.Config{
+		FailureThreshold:  3,           // Trip after 3 failures
+		ResetTimeout:     m.cfg.CircuitBreaker.ResetTimeout,  // Use configured timeout
+		HalfOpenRequests: 1,           // Allow 1 request in half-open state
+		TestMode:        false,        // Enable metrics in SetProviders
+	}
+
+	if cbConfig.ResetTimeout == 0 {
+		cbConfig.ResetTimeout = time.Minute // Default to 1 minute
+	}
+
+	// Initialize circuit breakers
+	for name := range providers {
+		m.breakers[name] = circuitbreaker.NewCircuitBreaker(
+			name,
+			cbConfig,
+			m.logger.With(zap.String("provider", name)),
+			m.registry, // Use the same registry as the manager
+		)
+	}
+}
+
+// GetHealthCheckErrors returns the health check errors counter for testing
+func (m *Manager) GetHealthCheckErrors() *prometheus.CounterVec {
+	return m.healthCheckErrors
 }

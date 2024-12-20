@@ -1,13 +1,16 @@
-package provider
+package provider_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/server/mocks"
+	"github.com/teilomillet/hapax/server/provider"
 	"go.uber.org/zap"
 )
 
@@ -49,9 +52,15 @@ func TestProviderHealth(t *testing.T) {
 
 			// Create config with health check settings
 			cfg := &config.Config{
+				TestMode: true,  // Skip provider initialization
+				Providers: map[string]config.ProviderConfig{
+					"mock": {
+						Type:  "mock",
+						Model: "test-model",
+					},
+				},
+				ProviderPreference: []string{"mock"},
 				LLM: config.LLMConfig{
-					Provider: "mock",
-					Model:    "test-model",
 					HealthCheck: &config.ProviderHealthCheck{
 						Enabled:          true,
 						Interval:         100 * time.Millisecond,
@@ -65,10 +74,14 @@ func TestProviderHealth(t *testing.T) {
 			providers := map[string]gollm.LLM{
 				"mock": mockLLM,
 			}
-			manager := NewManagerWithProviders(cfg, logger, providers)
+			manager, err := provider.NewManager(cfg, logger, prometheus.NewRegistry())
+			if err != nil {
+				t.Fatalf("Failed to create manager: %v", err)
+			}
+			manager.SetProviders(providers)
 
 			// Check provider health
-			status := manager.checkProviderHealth("mock", mockLLM)
+			status := manager.CheckProviderHealth("mock", mockLLM)
 
 			// Verify health status
 			if status.Healthy != tt.expectHealthy {
@@ -92,22 +105,18 @@ func TestProviderFailover(t *testing.T) {
 
 	// Create config with primary and backup providers
 	cfg := &config.Config{
-		LLM: config.LLMConfig{
-			Provider: "primary",
-			Model:    "test-model",
-			HealthCheck: &config.ProviderHealthCheck{
-				Enabled:          true,
-				Interval:         100 * time.Millisecond,
-				Timeout:         1 * time.Second,
-				FailureThreshold: 3,
+		TestMode: true,  // Skip provider initialization
+		Providers: map[string]config.ProviderConfig{
+			"primary": {
+				Type:  "primary",
+				Model: "primary-model",
 			},
-			BackupProviders: []config.BackupProvider{
-				{
-					Provider: "backup1",
-					Model:    "backup-model",
-				},
+			"backup1": {
+				Type:  "backup1",
+				Model: "backup-model",
 			},
 		},
+		ProviderPreference: []string{"primary", "backup1"},
 	}
 
 	// Setup mock providers
@@ -124,20 +133,106 @@ func TestProviderFailover(t *testing.T) {
 	}
 
 	// Create manager with mocks
-	manager := NewManagerWithProviders(cfg, logger, providers)
+	manager, err := provider.NewManager(cfg, logger, prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+	manager.SetProviders(providers)
 
 	// Update health states
-	manager.updateHealthStatus("primary", HealthStatus{Healthy: false, ConsecutiveFails: 3})
-	manager.updateHealthStatus("backup1", HealthStatus{Healthy: true, ConsecutiveFails: 0})
+	manager.UpdateHealthStatus("primary", provider.HealthStatus{Healthy: false, ConsecutiveFails: 3})
+	manager.UpdateHealthStatus("backup1", provider.HealthStatus{Healthy: true, ConsecutiveFails: 0})
 
 	// Test failover
-	provider, err := manager.GetHealthyProvider()
+	provider, err := manager.GetProvider()
 	if err != nil {
 		t.Fatalf("Failed to get healthy provider: %v", err)
 	}
 
 	// Verify we got the backup provider
-	if provider.GetProvider() != "backup1" {
-		t.Errorf("Expected backup1 provider, got %s", provider.GetProvider())
+	if provider != backupLLM {
+		t.Errorf("Expected backup1 provider, got %v", provider)
+	}
+}
+
+func TestMetricsInProduction(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Create config without test mode
+	cfg := &config.Config{
+		TestMode: true, // Skip provider initialization but not metrics
+		Providers: map[string]config.ProviderConfig{
+			"mock": {
+				Type:  "mock",
+				Model: "test-model",
+			},
+		},
+		ProviderPreference: []string{"mock"},
+		LLM: config.LLMConfig{
+			HealthCheck: &config.ProviderHealthCheck{
+				Enabled:          true,
+				Interval:         100 * time.Millisecond,
+				Timeout:         1 * time.Second,
+				FailureThreshold: 3,
+			},
+		},
+	}
+
+	// Create mock provider that fails
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, p *gollm.Prompt) (string, error) {
+		return "", context.DeadlineExceeded
+	})
+
+	// Create registry and manager
+	registry := prometheus.NewRegistry()
+	manager, err := provider.NewManager(cfg, logger, registry)
+	if err != nil {
+		t.Fatalf("Failed to create manager: %v", err)
+	}
+
+	// Set providers with metrics enabled
+	providers := map[string]gollm.LLM{
+		"mock": mockLLM,
+	}
+	manager.SetProviders(providers)
+
+	// Check provider health (should fail)
+	status := manager.CheckProviderHealth("mock", mockLLM)
+	if status.Healthy {
+		t.Error("Expected provider to be unhealthy")
+	}
+
+	// Verify metrics were registered and updated
+	metricFamilies, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("Failed to gather metrics: %v", err)
+	}
+
+	// Check if we have the expected metrics
+	expectedMetrics := []string{
+		"hapax_health_check_duration_seconds",
+		"hapax_health_check_errors_total",
+		"hapax_circuit_breaker_state",
+		"hapax_circuit_breaker_failures_total",
+		"hapax_circuit_breaker_trips_total",
+	}
+
+	for _, metricName := range expectedMetrics {
+		found := false
+		for _, mf := range metricFamilies {
+			if mf.GetName() == metricName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected metric %s not found", metricName)
+		}
+	}
+
+	// Verify error counter was incremented
+	errorCount := testutil.ToFloat64(manager.GetHealthCheckErrors().WithLabelValues("mock"))
+	if errorCount != 1 {
+		t.Errorf("Expected 1 error, got %v", errorCount)
 	}
 }

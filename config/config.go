@@ -24,6 +24,7 @@ type Config struct {
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	ProviderPreference []string `yaml:"provider_preference"` // Order of provider preference
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
+	TestMode           bool                          `yaml:"-"` // Skip provider initialization in tests
 }
 
 // ServerConfig holds server-specific configuration for the HTTP server.
