@@ -3,7 +3,7 @@
 A lightweight HTTP server for Large Language Model (LLM) interactions, built with Go.
 
 ## Version
-v0.0.8
+v0.0.9
 
 ## Features
 
@@ -23,6 +23,7 @@ v0.0.8
   - CORS support
   - API key authentication
   - Rate limiting (token bucket)
+  - Prometheus metrics collection
 - Enhanced error handling:
   - Structured JSON error responses
   - Request ID tracking in errors

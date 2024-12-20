@@ -32,7 +32,7 @@ Focus: Build a reliable, production-ready gateway server leveraging gollm's capa
   - Request transformation
   - Response formatting
   - Streaming support
-- [x] Provider management
+- [x] Provider managementg
   - Provider configuration
   - Provider health monitoring
   - Failover handling
@@ -46,13 +46,13 @@ Focus: Build a reliable, production-ready gateway server leveraging gollm's capa
   - Per-client limits
   - Token bucket implementation
   - Configurable limits
-- [ ] Basic monitoring
+- [x] Basic monitoring
   - Request metrics
   - Latency tracking
   - Error rate monitoring
 
 ## Phase 2: Production Readiness
-- Prometheus metrics integration
+- [x] Prometheus metrics integration
 - Load balancing
 - Circuit breakers
 - Request queueing
