@@ -1,0 +1,16 @@
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+llm:
+  provider: "ollama"  # Change to your preferred provider (ollama, openai, etc.)
+  model: "llama2"     # Change to your preferred model
+  endpoint: ""        # Set your provider's endpoint if needed
+
+logging:
+  level: "info"
+  format: "json"
+
+metrics:
+  enabled: true
