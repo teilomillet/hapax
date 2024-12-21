@@ -1,3 +1,4 @@
+// Package middleware provides various middleware functions for HTTP handlers.
 package middleware
 
 import (
@@ -11,11 +12,13 @@ import (
 const defaultTimeout = 5 * time.Second
 
 // timeoutWriter wraps http.ResponseWriter to track if a response has been written
+// It uses a channel to signal when the response has been sent.
 type timeoutWriter struct {
 	http.ResponseWriter
 	written chan bool
 }
 
+// Write writes the data to the connection and tracks if the response has been written.
 func (tw *timeoutWriter) Write(b []byte) (int, error) {
 	n, err := tw.ResponseWriter.Write(b)
 	if n > 0 {
@@ -27,7 +30,9 @@ func (tw *timeoutWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// WriteHeader sends an HTTP response header and tracks if the response has been written.
 func (tw *timeoutWriter) WriteHeader(code int) {
+	// Call the original WriteHeader method.
 	tw.ResponseWriter.WriteHeader(code)
 	select {
 	case tw.written <- true:
@@ -35,6 +40,7 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 	}
 }
 
+// hasWritten checks if the response has been written.
 func (tw *timeoutWriter) hasWritten() bool {
 	select {
 	case <-tw.written:
@@ -45,17 +51,22 @@ func (tw *timeoutWriter) hasWritten() bool {
 }
 
 // Timeout middleware adds a timeout to the request context
+// It allows you to specify a duration after which the request will be aborted if not completed.
+// 
+// The Timeout middleware works by creating a new context with a timeout, and using a custom 
+// timeoutWriter to track whether a response has been written. If the request times out and 
+// no response has been written, it sends a timeout error response.
 func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Create a context with timeout
 			ctx, cancel := context.WithTimeout(r.Context(), timeout)
-			defer cancel()
-
+			defer cancel() // Ensure cancel is called to release resources
+			
 			// Create a channel to signal completion
 			done := make(chan struct{})
 			
-			// Create a response writer wrapper
+			// Use the custom timeoutWriter to track response status.
 			tw := &timeoutWriter{
 				ResponseWriter: w,
 				written:       make(chan bool, 1),
