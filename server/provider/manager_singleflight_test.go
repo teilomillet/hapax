@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
@@ -17,28 +16,6 @@ import (
 	"github.com/teilomillet/hapax/server/mocks"
 	"go.uber.org/zap"
 )
-
-func getTestConfig() *config.Config {
-	return &config.Config{
-		TestMode: true,
-		CircuitBreaker: config.CircuitBreakerConfig{
-			MaxRequests:      1,                // Allow 1 request in half-open state
-			Interval:         time.Second,      // Cyclic period of closed state
-			Timeout:          time.Second * 30, // Period of open state
-			FailureThreshold: 2,                // Trip after 2 failures
-			TestMode:         true,
-		},
-		ProviderPreference: []string{"test-provider"}, // Match the provider name we use
-	}
-}
-
-// setupTestManager creates a manager and initializes a healthy provider
-func setupTestManager(t *testing.T) *Manager {
-	logger, _ := zap.NewDevelopment()
-	registry := prometheus.NewRegistry()
-	m, _ := NewManager(getTestConfig(), logger, registry)
-	return m
-}
 
 func TestManagerSingleflight(t *testing.T) {
 	t.Parallel()
@@ -176,17 +153,4 @@ func waitWithTimeout(wg *sync.WaitGroup, t *testing.T, timeout time.Duration) {
 	case <-time.After(timeout):
 		t.Fatal("Test timed out waiting for concurrent requests")
 	}
-}
-
-// Helper function to get counter value
-func getCounterValue(counter prometheus.Counter) (float64, error) {
-	metricChan := make(chan prometheus.Metric, 1)
-	counter.Collect(metricChan)
-	m := <-metricChan
-
-	var dtoMetric dto.Metric
-	if err := m.Write(&dtoMetric); err != nil {
-		return 0, err
-	}
-	return *dtoMetric.Counter.Value, nil
 }

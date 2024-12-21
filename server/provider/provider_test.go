@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -18,14 +19,16 @@ import (
 
 func TestProviderHealth(t *testing.T) {
 	t.Parallel()
-
 	logger := zap.NewNop()
 
+	// Define our test cases with explicit expectations
 	tests := []struct {
 		name          string
 		generateFunc  func(context.Context, *gollm.Prompt) (string, error)
 		expectHealthy bool
 		failureCount  int
+		expectedErr   error  // Adding explicit error expectations
+		description   string // Adding descriptions helps document test intent
 	}{
 		{
 			name: "healthy_provider",
@@ -34,15 +37,18 @@ func TestProviderHealth(t *testing.T) {
 			},
 			expectHealthy: true,
 			failureCount:  0,
+			expectedErr:   nil,
+			description:   "Provider should be healthy when generates successfully",
 		},
 		{
 			name: "provider_timeout",
 			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
-				// Return timeout error immediately instead of sleeping
 				return "", context.DeadlineExceeded
 			},
 			expectHealthy: false,
 			failureCount:  1,
+			expectedErr:   context.DeadlineExceeded,
+			description:   "Provider should be unhealthy when timing out",
 		},
 	}
 
@@ -51,11 +57,14 @@ func TestProviderHealth(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Create mock LLM with our test-specific behavior
 			mockLLM := mocks.NewMockLLM(tt.generateFunc)
 
+			// Set up context with timeout
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
+			// Configure the manager
 			cfg := &config.Config{
 				TestMode: true,
 				CircuitBreaker: config.CircuitBreakerConfig{
@@ -66,20 +75,36 @@ func TestProviderHealth(t *testing.T) {
 					TestMode:         true,
 				},
 			}
+
 			manager, err := provider.NewManager(cfg, logger, prometheus.NewRegistry())
 			if err != nil {
 				t.Fatalf("Failed to create manager: %v", err)
 			}
 
-			prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}}}
+			// Create test prompt
+			prompt := &gollm.Prompt{
+				Messages: []gollm.PromptMessage{
+					{Role: "user", Content: "test"},
+				},
+			}
+
+			// Attempt generation and verify error matches expectations
 			_, err = mockLLM.Generate(ctx, prompt)
+			if !errors.Is(err, tt.expectedErr) {
+				t.Errorf("Generate() error = %v, want %v", err, tt.expectedErr)
+			}
+
+			// Check provider health status
 			status := manager.CheckProviderHealth("test", mockLLM)
 
+			// Verify health status matches expectations
 			if status.Healthy != tt.expectHealthy {
-				t.Errorf("Expected healthy=%v, got %v", tt.expectHealthy, status.Healthy)
+				t.Errorf("Health status = %v, want %v", status.Healthy, tt.expectHealthy)
 			}
+
+			// Verify failure count matches expectations
 			if status.ConsecutiveFails != tt.failureCount {
-				t.Errorf("Expected failureCount=%d, got %d", tt.failureCount, status.ConsecutiveFails)
+				t.Errorf("Failure count = %d, want %d", status.ConsecutiveFails, tt.failureCount)
 			}
 		})
 	}
