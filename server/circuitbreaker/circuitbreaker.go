@@ -1,295 +1,149 @@
 package circuitbreaker
 
 import (
-	"errors"
-	"sync"
+	"fmt"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
 )
 
-// State represents the current state of the circuit breaker
-type State int
-
-const (
-	StateClosed State = iota    // Circuit is closed (allowing requests)
-	StateOpen                   // Circuit is open (blocking requests)
-	StateHalfOpen              // Circuit is half-open (testing if service is healthy)
-)
-
-// String returns a string representation of the circuit breaker state
-func (s State) String() string {
-	switch s {
-	case StateClosed:
-		return "closed"
-	case StateOpen:
-		return "open"
-	case StateHalfOpen:
-		return "half-open"
-	default:
-		return "unknown"
-	}
-}
-
-// Config holds configuration for the circuit breaker
 type Config struct {
-	FailureThreshold    int           // Number of failures before tripping
-	ResetTimeout       time.Duration  // Time to wait before attempting reset
-	HalfOpenRequests   int           // Number of requests to allow in half-open state (default 1)
-	TestMode          bool           // Skip metric registration in test mode
+	Name             string
+	MaxRequests      uint32
+	Interval         time.Duration
+	Timeout          time.Duration
+	FailureThreshold uint32
+	TestMode         bool
 }
 
-// CircuitBreaker implements the circuit breaker pattern
 type CircuitBreaker struct {
-	mu              sync.RWMutex
-	name            string
-	state           State
-	lastFailure     time.Time
-	failures        int
-	halfOpenFailures int  // Track failures in half-open state separately
-	halfOpenAllowed bool
-	config          Config
-	logger          *zap.Logger
-
-	// Prometheus metrics
-	stateGauge     prometheus.Gauge
-	failuresCount  prometheus.Counter
-	tripsTotal     prometheus.Counter
-
-	// Callback for state changes
-	onStateChange func(State)
+	name    string
+	breaker *gobreaker.CircuitBreaker
+	logger  *zap.Logger
+	metrics *metrics
 }
 
-// NewCircuitBreaker creates a new circuit breaker with the given configuration
-func NewCircuitBreaker(name string, config Config, logger *zap.Logger, registry *prometheus.Registry) *CircuitBreaker {
-	if config.FailureThreshold == 0 {
-		config.FailureThreshold = 5
-	}
-	if config.ResetTimeout == 0 {
-		config.ResetTimeout = 30 * time.Second
-	}
-	if config.HalfOpenRequests == 0 {
-		config.HalfOpenRequests = 1
+type metrics struct {
+	stateGauge   prometheus.Gauge
+	failureCount prometheus.Counter
+	tripsTotal   prometheus.Counter
+}
+
+func NewCircuitBreaker(config Config, logger *zap.Logger, registry *prometheus.Registry) (*CircuitBreaker, error) {
+	if config.Name == "" {
+		return nil, fmt.Errorf("circuit breaker name cannot be empty")
 	}
 
 	cb := &CircuitBreaker{
-		name:            name,
-		state:           StateClosed,
-		config:          config,
-		logger:          logger,
-		halfOpenAllowed: false,
+		name:   config.Name,
+		logger: logger,
 	}
 
-	// Initialize metrics
+	// Initialize metrics if not in test mode
 	if registry != nil && !config.TestMode {
-		cb.stateGauge = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "circuit_breaker_state",
-			Help: "Current state of the circuit breaker (0=closed, 1=half-open, 2=open)",
-			ConstLabels: prometheus.Labels{
-				"name": name,
-			},
-		})
-		cb.failuresCount = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "circuit_breaker_failures_total",
-			Help: "Total number of failures",
-			ConstLabels: prometheus.Labels{
-				"name": name,
-			},
-		})
-		cb.tripsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "circuit_breaker_trips_total",
-			Help: "Total number of times the circuit breaker has tripped",
-			ConstLabels: prometheus.Labels{
-				"name": name,
-			},
-		})
-
-		registry.MustRegister(cb.stateGauge)
-		registry.MustRegister(cb.failuresCount)
-		registry.MustRegister(cb.tripsTotal)
-	}
-
-	return cb
-}
-
-// Execute runs the given function if the circuit breaker allows it
-func (cb *CircuitBreaker) Execute(fn func() error) error {
-	if !cb.AllowRequest() {
-		cb.logger.Debug("request rejected by circuit breaker",
-			zap.String("name", cb.name))
-		// Record this as a failure in half-open state
-		if cb.GetState() == StateHalfOpen {
-			cb.RecordResult(errors.New("circuit breaker is open"))
+		cb.metrics = &metrics{
+			stateGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "circuit_breaker_state",
+				Help: "Current state of the circuit breaker (0=closed, 1=half-open, 2=open)",
+				ConstLabels: prometheus.Labels{
+					"name": config.Name,
+				},
+			}),
+			failureCount: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "circuit_breaker_failures_total",
+				Help: "Total number of failures",
+				ConstLabels: prometheus.Labels{
+					"name": config.Name,
+				},
+			}),
+			tripsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "circuit_breaker_trips_total",
+				Help: "Total number of times the circuit breaker has tripped",
+				ConstLabels: prometheus.Labels{
+					"name": config.Name,
+				},
+			}),
 		}
-		return errors.New("circuit breaker is open")
+
+		registry.MustRegister(cb.metrics.stateGauge)
+		registry.MustRegister(cb.metrics.failureCount)
+		registry.MustRegister(cb.metrics.tripsTotal)
 	}
 
-	err := fn()
-	cb.RecordResult(err)
-	return err
-}
+	settings := gobreaker.Settings{
+		Name:        config.Name,
+		MaxRequests: config.MaxRequests,
+		Interval:    config.Interval,
+		Timeout:     config.Timeout,
 
-// AllowRequest returns true if the request should be allowed
-func (cb *CircuitBreaker) AllowRequest() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	// Always allow in closed state
-	if cb.state == StateClosed {
-		cb.logger.Debug("circuit breaker is closed, allowing request",
-			zap.String("name", cb.name))
-		return true
-	}
-
-	// In open state, check if we should transition to half-open
-	if cb.state == StateOpen {
-		if time.Since(cb.lastFailure) > cb.config.ResetTimeout {
-			oldState := cb.state
-			cb.state = StateHalfOpen
-			cb.halfOpenAllowed = true  // Allow the first request
-			// Do not reset failures or halfOpenFailures when entering half-open state
-
-			if cb.stateGauge != nil {
-				cb.stateGauge.Set(float64(StateHalfOpen))
+		// Simplified ReadyToTrip that only looks at consecutive failures
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			shouldTrip := counts.ConsecutiveFailures >= config.FailureThreshold
+			if shouldTrip {
+				logger.Info("Circuit breaker tripping",
+					zap.String("name", config.Name),
+					zap.Uint32("consecutive_failures", counts.ConsecutiveFailures),
+					zap.Uint32("threshold", config.FailureThreshold))
 			}
+			return shouldTrip
+		},
 
-			// Do callbacks and logging
-			if cb.onStateChange != nil {
-				cb.onStateChange(StateHalfOpen)
+		OnStateChange: func(name string, from, to gobreaker.State) {
+			logger.Info("Circuit breaker state changed",
+				zap.String("name", name),
+				zap.String("from", from.String()),
+				zap.String("to", to.String()))
+
+			if cb.metrics != nil {
+				switch to {
+				case gobreaker.StateOpen:
+					cb.metrics.stateGauge.Set(2)
+					cb.metrics.tripsTotal.Inc()
+				case gobreaker.StateHalfOpen:
+					cb.metrics.stateGauge.Set(1)
+				case gobreaker.StateClosed:
+					cb.metrics.stateGauge.Set(0)
+				}
 			}
-			cb.logger.Debug("circuit breaker transitioning to half-open",
-				zap.String("name", cb.name))
-			cb.logger.Debug("circuit breaker state changed",
-				zap.String("name", cb.name),
-				zap.String("old_state", oldState.String()),
-				zap.String("new_state", StateHalfOpen.String()))
-		} else {
-			cb.logger.Debug("circuit breaker is open, rejecting request",
-				zap.String("name", cb.name),
-				zap.Time("last_failure", cb.lastFailure),
-				zap.Duration("reset_timeout", cb.config.ResetTimeout))
-			return false
-		}
+		},
 	}
 
-	// In half-open state, only allow one request
-	if cb.state == StateHalfOpen {
-		if cb.halfOpenAllowed {
-			cb.halfOpenAllowed = false  // Don't allow more requests until success
-			cb.logger.Debug("allowing request in half-open state",
-				zap.String("name", cb.name))
-			return true
-		}
-		cb.logger.Debug("rejecting request in half-open state",
-			zap.String("name", cb.name))
-		return false
-	}
-
-	return false
+	cb.breaker = gobreaker.NewCircuitBreaker(settings)
+	return cb, nil
 }
 
-// RecordResult records the result of a request
-func (cb *CircuitBreaker) RecordResult(err error) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
+func (cb *CircuitBreaker) Execute(operation func() error) error {
+	result, err := cb.breaker.Execute(func() (interface{}, error) {
+		if err := operation(); err != nil {
+			if cb.metrics != nil {
+				cb.metrics.failureCount.Inc()
+			}
+			cb.logger.Debug("Operation failed",
+				zap.String("name", cb.name),
+				zap.Error(err))
+			return nil, err
+		}
+		return nil, nil
+	})
 
 	if err != nil {
-		if cb.state == StateClosed {
-			cb.failures++
-			cb.logger.Debug("recorded failure",
-				zap.String("name", cb.name),
-				zap.Int("failures", cb.failures),
-				zap.Int("threshold", cb.config.FailureThreshold))
-
-			if cb.failures >= cb.config.FailureThreshold {
-				oldState := cb.state
-				cb.state = StateOpen
-				cb.lastFailure = time.Now()
-				// Don't reset half-open failures when going to open from closed
-
-				if cb.stateGauge != nil {
-					cb.stateGauge.Set(float64(StateOpen))
-				}
-
-				// Do callbacks and logging
-				if cb.onStateChange != nil {
-					cb.onStateChange(StateOpen)
-				}
-				cb.logger.Warn("Circuit breaker tripped",
-					zap.String("name", cb.name),
-					zap.Int("failures", cb.failures),
-					zap.Time("last_failure", cb.lastFailure))
-				cb.logger.Debug("circuit breaker state changed",
-					zap.String("name", cb.name),
-					zap.String("old_state", oldState.String()),
-					zap.String("new_state", StateOpen.String()))
-			}
-		} else if cb.state == StateHalfOpen {
-			cb.halfOpenFailures = 1  // Set to 1 to indicate our test request failed
-			oldState := cb.state
-			cb.state = StateOpen
-			cb.lastFailure = time.Now()
-			cb.halfOpenAllowed = false  // Don't allow more requests until next timeout
-
-			if cb.stateGauge != nil {
-				cb.stateGauge.Set(float64(StateOpen))
-			}
-
-			// Do callbacks and logging
-			if cb.onStateChange != nil {
-				cb.onStateChange(StateOpen)
-			}
-			cb.logger.Debug("failed request in half-open state, returning to open",
+		if err == gobreaker.ErrOpenState {
+			cb.logger.Debug("Circuit breaker is open",
 				zap.String("name", cb.name))
-			cb.logger.Debug("circuit breaker state changed",
-				zap.String("name", cb.name),
-				zap.String("old_state", oldState.String()),
-				zap.String("new_state", StateOpen.String()))
 		}
-	} else {
-		if cb.state == StateHalfOpen {
-			oldState := cb.state
-			cb.state = StateClosed
-			cb.failures = 0
-			cb.halfOpenFailures = 0  // Reset half-open failures on success
-			cb.halfOpenAllowed = false
-
-			if cb.stateGauge != nil {
-				cb.stateGauge.Set(float64(StateClosed))
-			}
-
-			// Do callbacks and logging
-			if cb.onStateChange != nil {
-				cb.onStateChange(StateClosed)
-			}
-			cb.logger.Debug("successful request in half-open state, transitioning to closed",
-				zap.String("name", cb.name))
-			cb.logger.Debug("circuit breaker state changed",
-				zap.String("name", cb.name),
-				zap.String("old_state", oldState.String()),
-				zap.String("new_state", StateClosed.String()))
-		}
+		return err
 	}
+
+	_ = result // Ignore result since we don't use it
+	return nil
 }
 
-// GetState returns the current state of the circuit breaker
-func (cb *CircuitBreaker) GetState() State {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
-	return cb.state
+func (cb *CircuitBreaker) State() gobreaker.State {
+	return cb.breaker.State()
 }
 
-// GetHalfOpenFailures returns the number of failures in half-open state
-func (cb *CircuitBreaker) GetHalfOpenFailures() int {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
-	return cb.halfOpenFailures
-}
-
-// SetStateChangeCallback sets a callback to be called when the circuit breaker state changes
-func (cb *CircuitBreaker) SetStateChangeCallback(callback func(State)) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.onStateChange = callback
+func (cb *CircuitBreaker) Counts() gobreaker.Counts {
+	return cb.breaker.Counts()
 }

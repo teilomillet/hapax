@@ -17,14 +17,14 @@ import (
 // It combines server settings, LLM configuration, logging preferences,
 // and route definitions into a single, cohesive configuration structure.
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	LLM     LLMConfig     `yaml:"llm"`
-	Logging LoggingConfig `yaml:"logging"`
-	Routes  []RouteConfig `yaml:"routes"`
-	Providers map[string]ProviderConfig `yaml:"providers"`
-	ProviderPreference []string `yaml:"provider_preference"` // Order of provider preference
-	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"`
-	TestMode           bool                          `yaml:"-"` // Skip provider initialization in tests
+	Server             ServerConfig              `yaml:"server"`
+	LLM                LLMConfig                 `yaml:"llm"`
+	Logging            LoggingConfig             `yaml:"logging"`
+	Routes             []RouteConfig             `yaml:"routes"`
+	Providers          map[string]ProviderConfig `yaml:"providers"`
+	ProviderPreference []string                  `yaml:"provider_preference"` // Order of provider preference
+	CircuitBreaker     CircuitBreakerConfig      `yaml:"circuit_breaker"`
+	TestMode           bool                      `yaml:"-"` // Skip provider initialization in tests
 }
 
 // ServerConfig holds server-specific configuration for the HTTP server.
@@ -172,9 +172,9 @@ type RetryConfig struct {
 
 // ProviderConfig holds configuration for an LLM provider
 type ProviderConfig struct {
-	Type  string `yaml:"type"`  // Provider type (e.g., openai, anthropic)
-	Model string `yaml:"model"` // Model name
-	APIKey string `yaml:"api_key"`  // API key for authentication
+	Type   string `yaml:"type"`    // Provider type (e.g., openai, anthropic)
+	Model  string `yaml:"model"`   // Model name
+	APIKey string `yaml:"api_key"` // API key for authentication
 }
 
 // LoggingConfig holds logging-specific configuration.
@@ -228,10 +228,21 @@ type HealthCheck struct {
 	Checks map[string]string `yaml:"checks"`
 }
 
-// CircuitBreakerConfig holds circuit breaker settings
 type CircuitBreakerConfig struct {
-	ResetTimeout time.Duration `yaml:"reset_timeout"`
-	TestMode     bool          `yaml:"test_mode"`
+	// MaxRequests is maximum number of requests allowed to pass through when in half-open state
+	MaxRequests uint32 `yaml:"max_requests"`
+
+	// Interval is the cyclic period of the closed state for the circuit breaker
+	Interval time.Duration `yaml:"interval"`
+
+	// Timeout is the period of the open state until it becomes half-open
+	Timeout time.Duration `yaml:"timeout"`
+
+	// FailureThreshold is the number of failures needed to trip the circuit
+	FailureThreshold uint32 `yaml:"failure_threshold"`
+
+	// TestMode indicates whether to skip Prometheus metric registration (for testing)
+	TestMode bool `yaml:"test_mode"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults

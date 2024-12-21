@@ -2,11 +2,13 @@ package provider_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/server/mocks"
@@ -15,9 +17,8 @@ import (
 )
 
 func TestProviderHealth(t *testing.T) {
-	t.Parallel() // Allow parallel execution
+	t.Parallel()
 
-	// Setup logger
 	logger := zap.NewNop()
 
 	tests := []struct {
@@ -25,7 +26,6 @@ func TestProviderHealth(t *testing.T) {
 		generateFunc  func(context.Context, *gollm.Prompt) (string, error)
 		expectHealthy bool
 		failureCount  int
-		timeout       bool
 	}{
 		{
 			name: "healthy_provider",
@@ -38,32 +38,32 @@ func TestProviderHealth(t *testing.T) {
 		{
 			name: "provider_timeout",
 			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
-				time.Sleep(2 * time.Second)
+				// Return timeout error immediately instead of sleeping
 				return "", context.DeadlineExceeded
 			},
 			expectHealthy: false,
 			failureCount:  1,
-			timeout:       true,
 		},
 	}
 
 	for _, tt := range tests {
-		tt := tt // Capture range variable for parallel execution
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel() // Allow parallel execution of subtests
+			t.Parallel()
 
-			// Create mock LLM with shorter timeout for test
 			mockLLM := mocks.NewMockLLM(tt.generateFunc)
 
-			// Create a context with timeout
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
-			// Create manager with test config
 			cfg := &config.Config{
 				TestMode: true,
 				CircuitBreaker: config.CircuitBreakerConfig{
-					ResetTimeout: 100 * time.Millisecond,
+					MaxRequests:      1,
+					Interval:         100 * time.Millisecond,
+					Timeout:          100 * time.Millisecond,
+					FailureThreshold: 2,
+					TestMode:         true,
 				},
 			}
 			manager, err := provider.NewManager(cfg, logger, prometheus.NewRegistry())
@@ -71,12 +71,10 @@ func TestProviderHealth(t *testing.T) {
 				t.Fatalf("Failed to create manager: %v", err)
 			}
 
-			// Check provider health with context
 			prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}}}
 			_, err = mockLLM.Generate(ctx, prompt)
 			status := manager.CheckProviderHealth("test", mockLLM)
 
-			// Verify health status
 			if status.Healthy != tt.expectHealthy {
 				t.Errorf("Expected healthy=%v, got %v", tt.expectHealthy, status.Healthy)
 			}
@@ -88,84 +86,94 @@ func TestProviderHealth(t *testing.T) {
 }
 
 func TestProviderFailover(t *testing.T) {
-	t.Parallel() // Allow parallel execution
+	logger, _ := zap.NewDevelopment()
+	logger.Info("Starting TestProviderFailover")
 
-	// Create a context with timeout for the entire test
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	logger := zap.NewNop()
-
-	// Create config with primary and backup providers
+	// Simple config with just two providers
 	cfg := &config.Config{
-		TestMode: true, // Skip provider initialization
+		TestMode: true,
 		Providers: map[string]config.ProviderConfig{
-			"primary": {
-				Type:  "primary",
-				Model: "primary-model",
-			},
-			"backup1": {
-				Type:  "backup1",
-				Model: "backup-model",
-			},
+			"primary": {Type: "primary", Model: "test"},
+			"backup":  {Type: "backup", Model: "test"},
 		},
-		ProviderPreference: []string{"primary", "backup1"},
+		ProviderPreference: []string{"primary", "backup"},
 		CircuitBreaker: config.CircuitBreakerConfig{
-			ResetTimeout: 100 * time.Millisecond,
+			MaxRequests:      1,
+			Interval:         time.Second,
+			Timeout:          time.Second,
+			FailureThreshold: 2,
+			TestMode:         true,
 		},
 	}
 
-	// Setup mock providers with context
-	primaryLLM := mocks.NewMockLLMWithConfig("primary", "primary-model", func(ctx context.Context, p *gollm.Prompt) (string, error) {
-		return "", context.DeadlineExceeded // Primary always fails
+	logger.Info("Creating providers")
+	callCount := 0
+	// Create providers with logging
+	primaryProvider := mocks.NewMockLLMWithConfig("primary", "test", func(ctx context.Context, p *gollm.Prompt) (string, error) {
+		callCount++
+		logger.Info("Primary provider called", zap.Int("call_count", callCount))
+		return "", fmt.Errorf("primary error")
 	})
-	backupLLM := mocks.NewMockLLMWithConfig("backup1", "backup-model", func(ctx context.Context, p *gollm.Prompt) (string, error) {
-		return "ok", nil // Backup is healthy
+
+	backupProvider := mocks.NewMockLLMWithConfig("backup", "test", func(ctx context.Context, p *gollm.Prompt) (string, error) {
+		logger.Info("Backup provider called")
+		return "backup ok", nil
 	})
 
 	providers := map[string]gollm.LLM{
-		"primary": primaryLLM,
-		"backup1": backupLLM,
+		"primary": primaryProvider,
+		"backup":  backupProvider,
 	}
 
-	// Create manager with mocks
-	manager, err := provider.NewManager(cfg, logger, prometheus.NewRegistry())
-	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
-	}
+	logger.Info("Creating manager")
+	reg := prometheus.NewRegistry()
+	manager, err := provider.NewManager(cfg, logger, reg)
+	require.NoError(t, err)
+
+	logger.Info("Setting providers")
 	manager.SetProviders(providers)
 
-	// Update health states
-	prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}}}
-	_, err = primaryLLM.Generate(ctx, prompt)
-	manager.UpdateHealthStatus("primary", provider.HealthStatus{Healthy: false, ConsecutiveFails: 3})
-	manager.UpdateHealthStatus("backup1", provider.HealthStatus{Healthy: true, ConsecutiveFails: 0})
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Test failover
-	provider, err := manager.GetProvider()
-	if err != nil {
-		t.Fatalf("Failed to get healthy provider: %v", err)
+	prompt := &gollm.Prompt{
+		Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}},
 	}
 
-	// Verify we got the backup provider
-	if provider != backupLLM {
-		t.Errorf("Expected backup1 provider, got %v", provider)
-	}
+	logger.Info("Executing first request (should fail)")
+	err = manager.Execute(ctx, func(llm gollm.LLM) error {
+		result, err := llm.Generate(ctx, prompt)
+		logger.Info("First request result", zap.String("result", result), zap.Error(err))
+		return err
+	}, prompt)
+	require.Error(t, err)
+	logger.Info("First request completed", zap.Error(err))
+
+	logger.Info("Executing second request (should succeed using backup)")
+	err = manager.Execute(ctx, func(llm gollm.LLM) error {
+		result, err := llm.Generate(ctx, prompt)
+		logger.Info("Second request result", zap.String("result", result), zap.Error(err))
+		if err == nil {
+			require.Equal(t, "backup ok", result)
+		}
+		return err
+	}, prompt)
+	require.NoError(t, err)
+	logger.Info("Second request completed", zap.Error(err))
 }
 
 func TestMetricsInProduction(t *testing.T) {
-	t.Parallel() // Allow parallel execution
+	t.Parallel()
 
-	// Create a context with timeout for the entire test
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	logger := zap.NewNop()
 	registry := prometheus.NewRegistry()
 
-	// Create test configuration
 	cfg := &config.Config{
-		TestMode: true, // Test production mode
+		TestMode: true,
 		Providers: map[string]config.ProviderConfig{
 			"test": {
 				Type:  "test",
@@ -174,11 +182,14 @@ func TestMetricsInProduction(t *testing.T) {
 		},
 		ProviderPreference: []string{"test"},
 		CircuitBreaker: config.CircuitBreakerConfig{
-			ResetTimeout: 100 * time.Millisecond,
+			MaxRequests:      1,
+			Interval:         time.Second,
+			Timeout:          100 * time.Millisecond,
+			FailureThreshold: 2,
+			TestMode:         true,
 		},
 	}
 
-	// Create mock provider with context
 	mockLLM := mocks.NewMockLLMWithConfig("test", "test-model", func(ctx context.Context, p *gollm.Prompt) (string, error) {
 		return "ok", nil
 	})
@@ -187,37 +198,31 @@ func TestMetricsInProduction(t *testing.T) {
 		"test": mockLLM,
 	}
 
-	// Create manager with mocks
 	manager, err := provider.NewManager(cfg, logger, registry)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
 	manager.SetProviders(providers)
 
-	// Test provider with context
 	prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}}}
 	_, err = mockLLM.Generate(ctx, prompt)
 	if err != nil {
 		t.Fatalf("Failed to generate response: %v", err)
 	}
 
-	// Update health status
 	manager.UpdateHealthStatus("test", provider.HealthStatus{
 		Healthy:    true,
 		LastCheck:  time.Now(),
 		ErrorCount: 0,
 	})
 
-	// Get metrics
 	healthCheckErrors := manager.GetHealthCheckErrors()
 
-	// Verify initial state
 	metricFamilies, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("Failed to gather metrics: %v", err)
 	}
 
-	// Check health check errors metric
 	var healthCheckErrorsValue float64
 	for _, mf := range metricFamilies {
 		if mf.GetName() == "provider_health_check_errors_total" {
@@ -230,16 +235,13 @@ func TestMetricsInProduction(t *testing.T) {
 		}
 	}
 
-	// Verify initial state
 	if healthCheckErrorsValue != 0 {
 		t.Errorf("Expected 0 health check errors, got %v", healthCheckErrorsValue)
 	}
 
-	// Simulate a health check error
-	healthCheckErrors.WithLabelValues("test", "timeout").Inc()
+	healthCheckErrors.WithLabelValues("test").Inc()
 
-	// Verify updated state
-	value := testutil.ToFloat64(healthCheckErrors.WithLabelValues("test", "timeout"))
+	value := testutil.ToFloat64(healthCheckErrors.WithLabelValues("test"))
 	if value != 1 {
 		t.Errorf("Expected 1 health check error, got %v", value)
 	}

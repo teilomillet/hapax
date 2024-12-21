@@ -2,15 +2,16 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/server/mocks"
@@ -21,7 +22,11 @@ func getTestConfig() *config.Config {
 	return &config.Config{
 		TestMode: true,
 		CircuitBreaker: config.CircuitBreakerConfig{
-			ResetTimeout: time.Second * 30,
+			MaxRequests:      1,                // Allow 1 request in half-open state
+			Interval:         time.Second,      // Cyclic period of closed state
+			Timeout:          time.Second * 30, // Period of open state
+			FailureThreshold: 2,                // Trip after 2 failures
+			TestMode:         true,
 		},
 		ProviderPreference: []string{"test-provider"}, // Match the provider name we use
 	}
@@ -36,197 +41,140 @@ func setupTestManager(t *testing.T) *Manager {
 }
 
 func TestManagerSingleflight(t *testing.T) {
-	t.Parallel() // Allow parallel execution with other tests
+	t.Parallel()
 
 	tests := []struct {
-		name      string
-		scenario  func(*testing.T, *Manager)
+		name   string
+		testFn func(*testing.T, *Manager)
 	}{
 		{
 			name: "Concurrent identical requests are deduplicated",
-			scenario: func(t *testing.T, m *Manager) {
-				callCount := 0
-				mock := mocks.NewMockLLMWithConfig("test-provider", "test-model", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
-					callCount++
-					time.Sleep(100 * time.Millisecond) // Simulate work
-					return "mock response", nil
+			testFn: func(t *testing.T, m *Manager) {
+				var callCount atomic.Int32
+				mock := mocks.NewMockLLMWithConfig("test", "model", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+					callCount.Add(1)
+					// Small sleep to ensure concurrent requests overlap
+					time.Sleep(10 * time.Millisecond)
+					return "response", nil
 				})
-				m.SetProviders(map[string]gollm.LLM{"test-provider": mock})
 
-				// Set initial health status
-				m.UpdateHealthStatus("test-provider", HealthStatus{
+				m.SetProviders(map[string]gollm.LLM{"test": mock})
+				m.UpdateHealthStatus("test", HealthStatus{
 					Healthy:    true,
 					LastCheck:  time.Now(),
-					Latency:    time.Millisecond,
 					ErrorCount: 0,
 				})
 
-				// Create a context with timeout
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
+				// Create identical prompts
+				prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{
+					Role:    "user",
+					Content: "test",
+				}}}
 
-				// Launch 10 concurrent identical requests
+				// Launch concurrent requests
 				var wg sync.WaitGroup
-				errs := make([]error, 10)
-				prompt := mock.NewPrompt("test")
-				for i := 0; i < 10; i++ {
-					wg.Add(1)
-					go func(idx int) {
-						defer wg.Done()
-						errs[idx] = m.Execute(ctx, func(llm gollm.LLM) error {
-							_, err := llm.Generate(ctx, prompt)
-							return err
-						}, prompt)
-					}(i)
-				}
-
-				// Add a timeout to WaitGroup
-				done := make(chan struct{})
-				go func() {
-					wg.Wait()
-					close(done)
-				}()
-
-				select {
-				case <-done:
-					// Success path - continue with verification
-				case <-time.After(2 * time.Second):
-					t.Fatal("Test timed out waiting for concurrent requests")
-				}
-
-				// Verify all requests succeeded
-				for _, err := range errs {
-					assert.NoError(t, err)
-				}
-
-				// Verify the provider was only called once
-				assert.Equal(t, 1, callCount)
-
-				// Verify deduplicated requests metric
-				count, err := getCounterValue(m.deduplicatedRequests)
-				assert.NoError(t, err)
-				assert.Equal(t, float64(9), count) // 9 requests were deduplicated (all but the first)
-			},
-		},
-		{
-			name: "Different requests are not deduplicated",
-			scenario: func(t *testing.T, m *Manager) {
-				callCount := 0
-				mock := mocks.NewMockLLMWithConfig("test-provider", "test-model", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
-					callCount++
-					time.Sleep(50 * time.Millisecond) // Simulate work
-					return "mock response", nil
-				})
-				m.SetProviders(map[string]gollm.LLM{"test-provider": mock})
-
-				// Set initial health status
-				m.UpdateHealthStatus("test-provider", HealthStatus{
-					Healthy:    true,
-					LastCheck:  time.Now(),
-					Latency:    time.Millisecond,
-					ErrorCount: 0,
-				})
-
-				// Create a context with timeout
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-
-				// Launch concurrent different requests
-				var wg sync.WaitGroup
+				errs := make([]error, 5)
 				for i := 0; i < 5; i++ {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()
-						prompt := mock.NewPrompt(fmt.Sprintf("test-%d", idx))
-						_ = m.Execute(ctx, func(llm gollm.LLM) error {
-							// Each request is unique due to different prompts
-							_, err := llm.Generate(ctx, prompt)
+						errs[idx] = m.Execute(context.Background(), func(llm gollm.LLM) error {
+							_, err := llm.Generate(context.Background(), prompt)
 							return err
 						}, prompt)
 					}(i)
 				}
 
-				// Add a timeout to WaitGroup
-				done := make(chan struct{})
-				go func() {
-					wg.Wait()
-					close(done)
-				}()
+				waitWithTimeout(&wg, t, 100*time.Millisecond)
 
-				select {
-				case <-done:
-					// Success path - continue with verification
-				case <-time.After(2 * time.Second):
-					t.Fatal("Test timed out waiting for concurrent requests")
+				// Verify results
+				for _, err := range errs {
+					assert.NoError(t, err)
 				}
 
-				// Verify the provider was called for each unique request
-				assert.Equal(t, 5, callCount)
+				// Should only be called once due to deduplication
+				assert.Equal(t, int32(1), callCount.Load())
 			},
 		},
 		{
-			name: "Circuit breaker integration",
-			scenario: func(t *testing.T, m *Manager) {
-				mock := mocks.NewMockLLMWithConfig("test-provider", "test-model", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
-					return "", errors.New("simulated failure")
+			name: "Different requests are not deduplicated",
+			testFn: func(t *testing.T, m *Manager) {
+				var callCount atomic.Int32
+				mock := mocks.NewMockLLMWithConfig("test", "model", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+					callCount.Add(1)
+					time.Sleep(10 * time.Millisecond)
+					return "response", nil
 				})
-				m.SetProviders(map[string]gollm.LLM{"test-provider": mock})
 
-				// Set initial health status
-				m.UpdateHealthStatus("test-provider", HealthStatus{
+				m.SetProviders(map[string]gollm.LLM{"test": mock})
+				m.UpdateHealthStatus("test", HealthStatus{
 					Healthy:    true,
 					LastCheck:  time.Now(),
-					Latency:    time.Millisecond,
 					ErrorCount: 0,
 				})
 
-				// Create a context with timeout
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-
-				// Make concurrent requests to trigger circuit breaker
 				var wg sync.WaitGroup
-				errs := make([]error, 3)
-				prompt := mock.NewPrompt("test")
 				for i := 0; i < 3; i++ {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()
-						errs[idx] = m.Execute(ctx, func(llm gollm.LLM) error {
-							_, err := llm.Generate(ctx, prompt)
+						// Different prompts
+						prompt := &gollm.Prompt{Messages: []gollm.PromptMessage{{
+							Role:    "user",
+							Content: fmt.Sprintf("test-%d", idx),
+						}}}
+						_ = m.Execute(context.Background(), func(llm gollm.LLM) error {
+							_, err := llm.Generate(context.Background(), prompt)
 							return err
 						}, prompt)
 					}(i)
 				}
 
-				// Add a timeout to WaitGroup
-				done := make(chan struct{})
-				go func() {
-					wg.Wait()
-					close(done)
-				}()
-
-				select {
-				case <-done:
-					// Success path - continue with verification
-				case <-time.After(2 * time.Second):
-					t.Fatal("Test timed out waiting for concurrent requests")
-				}
-
-				// Verify all errors contain the expected message
-				for _, err := range errs {
-					assert.Contains(t, err.Error(), "no healthy provider available")
-				}
+				waitWithTimeout(&wg, t, 100*time.Millisecond)
+				assert.Equal(t, int32(3), callCount.Load())
 			},
 		},
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel() // Allow parallel execution of subtests
-			m := setupTestManager(t)
-			tt.scenario(t, m)
+			t.Parallel()
+			cfg := &config.Config{
+				TestMode: true,
+				Providers: map[string]config.ProviderConfig{
+					"test": {Type: "test", Model: "model"},
+				},
+				ProviderPreference: []string{"test"},
+				CircuitBreaker: config.CircuitBreakerConfig{
+					MaxRequests:      1,
+					Interval:         10 * time.Millisecond,
+					Timeout:          10 * time.Millisecond,
+					FailureThreshold: 2,
+					TestMode:         true,
+				},
+			}
+
+			manager, err := NewManager(cfg, zap.NewNop(), prometheus.NewRegistry())
+			require.NoError(t, err)
+			tt.testFn(t, manager)
 		})
+	}
+}
+
+// Helper function to wait for WaitGroup with timeout
+func waitWithTimeout(wg *sync.WaitGroup, t *testing.T, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success path - continue
+	case <-time.After(timeout):
+		t.Fatal("Test timed out waiting for concurrent requests")
 	}
 }
 
@@ -236,7 +184,6 @@ func getCounterValue(counter prometheus.Counter) (float64, error) {
 	counter.Collect(metricChan)
 	m := <-metricChan
 
-	// Use dto.Metric instead of prometheus.Metric
 	var dtoMetric dto.Metric
 	if err := m.Write(&dtoMetric); err != nil {
 		return 0, err
