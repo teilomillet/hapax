@@ -39,13 +39,13 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         // Set CORS headers to allow cross-origin requests
         w.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
-        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS") // Allow GET, POST, and OPTIONS methods
-        w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // Allow Content-Type header
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") // Allow GET, POST, PUT, DELETE, and OPTIONS methods
+        w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-CSRF-Token") // Allow Accept, Authorization, Content-Type, and X-CSRF-Token headers
 
         // Handle preflight requests
         if r.Method == http.MethodOptions {
-            // Respond with 200 OK for preflight requests
-            w.WriteHeader(http.StatusOK)
+            // Respond with 204 No Content for preflight requests
+            w.WriteHeader(http.StatusNoContent)
             return
         }
 
