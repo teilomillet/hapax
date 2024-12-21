@@ -44,11 +44,11 @@ func TestDockerBuild(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping docker build test in short mode")
 	}
-	
+
 	// Docker builds can take a while, especially on CI
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	
+
 	// cleanup ensures we don't have leftover containers from previous test runs
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -60,13 +60,8 @@ func TestDockerBuild(t *testing.T) {
 
 	// Create a temporary test environment
 	tmpDir := t.TempDir()
-	
-	// Create test configuration file
-	// This configuration:
-	// - Sets up a basic HTTP server on port 8080
-	// - Configures OpenAI as the LLM provider (required for integration tests)
-	// - Enables Prometheus metrics
-	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Create test configuration file with all necessary settings
 	configContent := []byte(`
 server:
   port: 8080
@@ -85,15 +80,12 @@ metrics:
   prometheus:
     enabled: true
 `)
+
+	// Write config file to the build context directory
+	configPath := filepath.Join(tmpDir, "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, configContent, 0644))
 
-	// Create a test Dockerfile that:
-	// 1. Uses multi-stage build for smaller final image
-	// 2. Builds the application in a builder stage
-	// 3. Creates a minimal runtime image with only necessary components
-	// 4. Runs as non-root user for security
-	// 5. Includes health check to verify application status
-	dockerfilePath := filepath.Join(tmpDir, "Dockerfile")
+	// Create a Dockerfile that properly handles the config file
 	dockerfileContent := []byte(`
 FROM golang:1.22-alpine AS builder
 RUN apk add --no-cache git gcc musl-dev
@@ -107,39 +99,45 @@ RUN adduser -D -g '' hapax
 RUN apk add --no-cache ca-certificates tzdata curl
 WORKDIR /app
 COPY --from=builder /app/hapax .
-COPY config.yaml ./config.yaml
+# Copy the config file into the container
+COPY config.yaml /app/config.yaml
 USER hapax
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
-ENTRYPOINT ["./hapax"]
-CMD ["--config", "config.yaml"]
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+CMD ["./hapax", "--config", "/app/config.yaml"]
 `)
+
+	dockerfilePath := filepath.Join(tmpDir, "Dockerfile")
 	require.NoError(t, os.WriteFile(dockerfilePath, dockerfileContent, 0644))
 
-	// Copy all required project files to test directory
-	// This includes source code, dependencies, and configuration
-	for _, item := range []string{"go.mod", "go.sum", "cmd", "server", "errors", "examples", "config"} {
-		cmd := exec.Command("cp", "-r", filepath.Join(projectRoot, item), tmpDir)
+	// Copy all required project files to the build context
+	requiredFiles := []string{
+		"go.mod",
+		"go.sum",
+		"cmd",
+		"server",
+		"errors",
+		"examples",
+		"config",
+	}
+
+	for _, item := range requiredFiles {
+		srcPath := filepath.Join(projectRoot, item)
+		dstPath := filepath.Join(tmpDir, item)
+		cmd := exec.Command("cp", "-r", srcPath, dstPath)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		require.NoError(t, cmd.Run(), "Copy "+item+" should succeed")
 	}
 
-	// Copy test config to temp dir to ensure it's included in the build
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "config.yaml"), configContent, 0644))
-
 	// Build the Docker image
-	// We output build logs to help diagnose any build failures
 	cmd := exec.CommandContext(ctx, "docker", "build", "-t", containerName, "-f", dockerfilePath, tmpDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Run(), "Docker build should succeed")
 
-	// Start the container with:
-	// - JSON file logging for better log parsing
-	// - Port mapping to access the application
-	// - Container name for easy reference
+	// Start the container
 	cmd = exec.CommandContext(ctx, "docker", "run",
 		"-d",
 		"--name", containerName,
@@ -151,21 +149,15 @@ CMD ["--config", "config.yaml"]
 	require.NoError(t, cmd.Run(), "Docker run should succeed")
 
 	// Give the container time to initialize
-	// This is necessary because the application needs time to:
-	// 1. Start the HTTP server
-	// 2. Initialize the LLM client
-	// 3. Complete the first health check
 	time.Sleep(5 * time.Second)
 
-	// Check container status to verify it's running properly
-	// This helps diagnose if the container crashed or failed to start
+	// Check container status
 	cmd = exec.CommandContext(ctx, "docker", "inspect", "--format={{.State.Status}} {{.State.ExitCode}}", containerName)
 	status, err := cmd.Output()
 	require.NoError(t, err, "Should get container status")
 	t.Logf("Container status: %s", string(status))
 
-	// Fetch container logs to help diagnose any startup issues
-	// We use --details to get additional metadata with the logs
+	// Fetch container logs
 	cmd = exec.CommandContext(ctx, "docker", "logs", "--details", containerName)
 	logs, err := cmd.CombinedOutput()
 	if err == nil {
@@ -174,14 +166,13 @@ CMD ["--config", "config.yaml"]
 		t.Logf("Error getting logs: %v\n%s", err, string(logs))
 	}
 
-	// Test the health check endpoint
+	// Test health check endpoint
 	t.Run("Health Check", func(t *testing.T) {
 		var resp *http.Response
 		var err error
 		var lastErr error
-		
+
 		// Try health check with retries
-		// This handles the case where the application might take longer to start
 		for i := 0; i < 3; i++ {
 			resp, err = http.Get(healthEndpoint)
 			if err == nil && resp.StatusCode == http.StatusOK {
@@ -192,7 +183,7 @@ CMD ["--config", "config.yaml"]
 				resp.Body.Close()
 			}
 
-			// On retry, print container status and logs to help diagnose issues
+			// Print diagnostics on retry
 			if logs, err := exec.CommandContext(ctx, "docker", "logs", "--details", containerName).CombinedOutput(); err == nil {
 				t.Logf("Container logs (attempt %d):\n%s", i+1, string(logs))
 			}
@@ -205,7 +196,6 @@ CMD ["--config", "config.yaml"]
 		require.NoError(t, lastErr, "Health check request should succeed")
 		defer resp.Body.Close()
 
-		// Verify health check response format
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 		body, err := io.ReadAll(resp.Body)
@@ -218,11 +208,7 @@ CMD ["--config", "config.yaml"]
 		assert.Equal(t, "ok", health.Status)
 	})
 
-	// Test the Prometheus metrics endpoint
-	// This verifies that:
-	// 1. The endpoint is accessible
-	// 2. Returns correct content type for Prometheus
-	// 3. Contains our application metrics
+	// Test metrics endpoint
 	t.Run("Metrics Endpoint", func(t *testing.T) {
 		resp, err := http.Get("http://localhost:" + containerPort + "/metrics")
 		require.NoError(t, err, "Metrics request should succeed")
@@ -239,18 +225,21 @@ CMD ["--config", "config.yaml"]
 
 func TestDockerCompose(t *testing.T) {
 	ctx := context.Background()
+
+	// Enhanced cleanup to remove both containers and test config
 	cleanup := func() {
 		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", filepath.Join(projectRoot, "docker-compose.yml"), "down", "-v")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Run()
+		// Clean up the config file
+		os.Remove(filepath.Join(projectRoot, "config.yaml"))
 	}
-	cleanup() // Clean up any leftover containers
+	cleanup() // Clean up any leftover containers and files
 	defer cleanup()
 
-	// Create test config
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.yaml")
+	// Create test config in project root (where docker-compose expects it)
+	configPath := filepath.Join(projectRoot, "config.yaml")
 	configContent := []byte(`
 server:
   port: 8080
@@ -271,11 +260,10 @@ metrics:
 `)
 	require.NoError(t, os.WriteFile(configPath, configContent, 0644))
 
-	// Start services with test config
+	// Start services (removed env var since we're using volume mount)
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", filepath.Join(projectRoot, "docker-compose.yml"), "--env-file", "/dev/null", "up", "-d")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), "HAPAX_CONFIG="+configPath)
 	require.NoError(t, cmd.Run(), "Docker Compose up should succeed")
 
 	// Give services time to start up
