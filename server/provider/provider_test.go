@@ -110,10 +110,20 @@ func TestProviderHealth(t *testing.T) {
 	}
 }
 
+// TestProviderFailover verifies the behavior of the circuit breaker
+// and the handling of failures across requests.
+// It ensures that the first request fails as expected, the second request
+// triggers the circuit breaker and attempts to use backup providers,
+// and that proper error messages are returned when no providers are available.
+
 func TestProviderFailover(t *testing.T) {
+	// This test case is crucial in verifying the circuit breaker behavior
+	// and its impact on the overall system reliability.
+
 	logger, _ := zap.NewDevelopment()
 	logger.Info("Starting TestProviderFailover")
 
+	// Setup test cases for primary and backup providers
 	// Simple config with just two providers
 	cfg := &config.Config{
 		TestMode: true,
@@ -166,6 +176,36 @@ func TestProviderFailover(t *testing.T) {
 		Messages: []gollm.PromptMessage{{Role: "user", Content: "test"}},
 	}
 
+	// **Key Insights**
+	//
+	// The key insight is to understand the relationship between single-request behavior and cross-request state.
+	// The circuit breaker maintains state across requests, but each individual request needs clear, predictable behavior.
+	//
+	// **Single-Request Behavior**
+	//
+	// When the first request comes in:
+	// 1. The breaker is closed (not open).
+	// 2. We hit the else clause.
+	// 3. We return the primary error immediately.
+	// 4. This failure gets recorded in the circuit breaker's state.
+	//
+	// **Cross-Request State Evolution**
+	//
+	// For the second request:
+	// 1. The primary provider fails again.
+	// 2. This triggers the circuit breaker to open.
+	// 3. Because the breaker is now open, we hit the first condition.
+	// 4. The continue statement moves us to try the backup provider.
+	// 5. All of this happens within the same request.
+	//
+	// **Properties Maintained**
+	//
+	// This pattern maintains two important properties:
+	// 1. **Isolation**: Each request has clear, predictable behavior.
+	// 2. **State Evolution**: The circuit breaker accumulates state across requests.
+
+	// First request should fail with the primary error
+	// This verifies that the circuit breaker records the failure correctly.
 	logger.Info("Executing first request (should fail)")
 	err = manager.Execute(ctx, func(llm gollm.LLM) error {
 		result, err := llm.Generate(ctx, prompt)
@@ -175,6 +215,10 @@ func TestProviderFailover(t *testing.T) {
 	require.Error(t, err)
 	logger.Info("First request completed", zap.Error(err))
 
+	// Second request should try primary, detect circuit breaker opening,
+	// and immediately try backup providers.
+	// If all providers fail, we need to ensure proper error handling
+	// and meaningful error messages are returned.
 	logger.Info("Executing second request (should succeed using backup)")
 	err = manager.Execute(ctx, func(llm gollm.LLM) error {
 		result, err := llm.Generate(ctx, prompt)
