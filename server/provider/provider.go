@@ -15,9 +15,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Manager handles LLM provider management and selection
-// Fields: providers, breakers, healthStates, logger, cfg, mu, group, registry, healthCheckDuration, healthCheckErrors, requestLatency, deduplicatedRequests, opCounter, healthyProviders
-
 // maxProviderRetries defines the maximum number of times we'll retry through the provider list
 // before giving up. This prevents infinite loops when all providers are unhealthy.
 const maxProviderRetries = 3

@@ -1,3 +1,4 @@
+// Package routing provides dynamic HTTP routing with versioning and health checks.
 package routing
 
 import (
@@ -16,6 +17,7 @@ import (
 )
 
 // Router handles dynamic HTTP routing with versioning and health checks.
+// It utilizes chi for routing and provides middleware support for metrics and authentication.
 type Router struct {
 	router      chi.Router              // Chi router instance for HTTP routing
 	handlers    map[string]http.Handler // Map of handler names to implementations
@@ -25,7 +27,7 @@ type Router struct {
 	metrics     *metrics.Metrics        // Metrics instance for monitoring
 }
 
-// NewRouter creates a new router with the given configuration.
+// NewRouter creates a new router with the given configuration and initializes routes.
 func NewRouter(cfg *config.Config, handlers map[string]http.Handler, logger *zap.Logger, metrics *metrics.Metrics) *Router {
 	r := &Router{
 		router:   chi.NewRouter(),
@@ -41,35 +43,35 @@ func NewRouter(cfg *config.Config, handlers map[string]http.Handler, logger *zap
 	return r
 }
 
-// setupRoutes configures all routes based on the configuration.
+// setupRoutes configures all routes based on the configuration provided in the server config.
 func (r *Router) setupRoutes() {
-	// Add global middleware
+	// Add global middleware for metrics monitoring
 	r.router.Use(middleware.PrometheusMetrics(r.metrics))
 
 	// Configure routes from config
 	for _, route := range r.cfg.Routes {
-		// Get handler
+		// Get handler for the route
 		handler, ok := r.handlers[route.Handler]
 		if !ok {
 			r.logger.Error("handler not found", zap.String("handler", route.Handler))
 			continue
 		}
 
-		// Add version prefix if specified
+		// Add version prefix to the path if specified
 		path := route.Path
 		if route.Version != "" {
 			path = fmt.Sprintf("/%s%s", route.Version, path)
 		}
 
-		// Create route group with middleware
+		// Create route group with specified middleware
 		r.router.Group(func(router chi.Router) {
 			// Add route-specific middleware
 			for _, mw := range route.Middleware {
 				switch mw {
 				case "auth":
-					router.Use(middleware.Authentication)
+					router.Use(middleware.Authentication) // Add authentication middleware
 				case "ratelimit":
-					router.Use(middleware.RateLimit(r.metrics))
+					router.Use(middleware.RateLimit(r.metrics)) // Add rate limiting middleware
 				default:
 					r.logger.Warn("unknown middleware requested", zap.String("middleware", mw))
 				}
@@ -94,25 +96,25 @@ func (r *Router) setupRoutes() {
 								return
 							}
 						}
-						next.ServeHTTP(w, r)
+						next.ServeHTTP(w, r) // Call the next handler
 					})
 				})
 			}
 
-			// Handle methods
+			// Handle methods for the route
 			if len(route.Methods) > 0 {
 				for _, method := range route.Methods {
-					router.Method(method, path, handler)
+					router.Method(method, path, handler) // Register method-specific handler
 				}
 			} else {
-				router.Handle(path, handler)
+				router.Handle(path, handler) // Default to handle for all methods
 			}
 
 			// Configure health check if enabled
 			if route.HealthCheck != nil {
 				healthPath := fmt.Sprintf("%s/health", path)
-				router.Get(healthPath, r.healthCheckHandler(route))
-				r.startHealthCheck(route)
+				router.Get(healthPath, r.healthCheckHandler(route)) // Register health check handler
+				r.startHealthCheck(route) // Start health check routine
 			}
 		})
 	}
@@ -125,23 +127,26 @@ func (r *Router) setupRoutes() {
 }
 
 // healthCheckHandler returns a handler for route-specific health checks.
+// It checks the health state of the route and responds accordingly.
 func (r *Router) healthCheckHandler(route config.RouteConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		status := "healthy"
 		if v, ok := r.healthState.Load(route.Path); ok && !v.(bool) {
 			status = "unhealthy"
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusServiceUnavailable) // Respond with 503 if unhealthy
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": status})
+		json.NewEncoder(w).Encode(map[string]string{"status": status}) // Encode health status as JSON
 	}
 }
 
 // globalHealthCheckHandler returns a handler for the global health check endpoint.
+// It checks the health of all routes and responds with their statuses.
 func (r *Router) globalHealthCheckHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		allHealthy := true
-		statuses := make(map[string]string)
+		statuses := make(map[string]string) // Map to hold health statuses
 
+		// Iterate through health states of all routes
 		r.healthState.Range(func(key, value interface{}) bool {
 			path := key.(string)
 			healthy := value.(bool)
@@ -155,20 +160,21 @@ func (r *Router) globalHealthCheckHandler() http.HandlerFunc {
 		})
 
 		if !allHealthy {
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusServiceUnavailable) // Respond with 503 if any service is unhealthy
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":   map[string]bool{"global": allHealthy},
 			"services": statuses,
-		})
+		}) // Encode global health status as JSON
 	}
 }
 
 // startHealthCheck starts a health check goroutine for the given route.
+// It periodically checks the health of the route and updates the health state.
 func (r *Router) startHealthCheck(route config.RouteConfig) {
 	if route.HealthCheck == nil {
-		return
+		return // Exit if no health check configuration
 	}
 
 	// Initialize health state
@@ -176,7 +182,7 @@ func (r *Router) startHealthCheck(route config.RouteConfig) {
 
 	// Start health check goroutine
 	go func() {
-		ticker := time.NewTicker(route.HealthCheck.Interval)
+		ticker := time.NewTicker(route.HealthCheck.Interval) // Set up ticker for health checks
 		failures := 0
 
 		for range ticker.C {
@@ -186,9 +192,9 @@ func (r *Router) startHealthCheck(route config.RouteConfig) {
 			for name, checkType := range route.HealthCheck.Checks {
 				switch checkType {
 				case "http":
-					healthy = r.checkHTTPHealth(route)
+					healthy = r.checkHTTPHealth(route) // Perform HTTP health check
 				case "tcp":
-					healthy = r.checkTCPHealth(route)
+					healthy = r.checkTCPHealth(route) // Perform TCP health check
 				default:
 					r.logger.Warn("unknown health check type",
 						zap.String("type", checkType),
@@ -198,7 +204,7 @@ func (r *Router) startHealthCheck(route config.RouteConfig) {
 				if !healthy {
 					failures++
 					if failures >= route.HealthCheck.Threshold {
-						r.healthState.Store(route.Path, false)
+						r.healthState.Store(route.Path, false) // Mark route as unhealthy
 					}
 					break
 				}
@@ -213,6 +219,7 @@ func (r *Router) startHealthCheck(route config.RouteConfig) {
 }
 
 // checkHTTPHealth performs an HTTP health check for a route.
+// It returns true if the route is healthy, false otherwise.
 func (r *Router) checkHTTPHealth(route config.RouteConfig) bool {
 	client := &http.Client{
 		Timeout: route.HealthCheck.Timeout,
@@ -228,12 +235,14 @@ func (r *Router) checkHTTPHealth(route config.RouteConfig) bool {
 }
 
 // checkTCPHealth performs a TCP health check for a route.
+// It returns true if the route is healthy, false otherwise.
 func (r *Router) checkTCPHealth(route config.RouteConfig) bool {
 	// Implement TCP health check logic here
 	return true
 }
 
 // ServeHTTP implements the http.Handler interface.
+// It handles incoming HTTP requests.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.router.ServeHTTP(w, req)
 }

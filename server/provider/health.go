@@ -10,9 +10,6 @@ import (
 )
 
 // HealthStatus represents the current health state of a provider
-// Fields: Healthy, LastCheck, ConsecutiveFails, Latency, ErrorCount, RequestCount
-
-// HealthStatus represents the current health state of a provider
 type HealthStatus struct {
 	Healthy          bool          // Whether the provider is currently healthy
 	LastCheck        time.Time     // When the last health check was performed
