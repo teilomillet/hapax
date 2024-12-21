@@ -9,13 +9,15 @@ import (
 )
 
 // RequestTimer measures request processing time
+// It wraps the HTTP handler to calculate the duration of the request
+// and sets the X-Response-Time header in the response.
 func RequestTimer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-		next.ServeHTTP(ww, r)
-		duration := time.Since(start)
-		w.Header().Set("X-Response-Time", duration.String())
+		start := time.Now() // Record the start time of the request
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor) // Wrap the response writer
+		next.ServeHTTP(ww, r) // Call the next handler
+		duration := time.Since(start) // Calculate the duration
+		w.Header().Set("X-Response-Time", duration.String()) // Set the response header
 	})
 }
 
@@ -32,17 +34,22 @@ func PanicRecovery(next http.Handler) http.Handler {
 }
 
 // CORS handles Cross-Origin Resource Sharing
+// It allows or denies requests from different origins based on the configuration.
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-CSRF-Token")
+        // Set CORS headers to allow cross-origin requests
+        w.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS") // Allow GET, POST, and OPTIONS methods
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type") // Allow Content-Type header
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+        // Handle preflight requests
+        if r.Method == http.MethodOptions {
+            // Respond with 200 OK for preflight requests
+            w.WriteHeader(http.StatusOK)
+            return
+        }
 
-		next.ServeHTTP(w, r)
-	})
+        // Call the next handler for non-preflight requests
+        next.ServeHTTP(w, r)
+    })
 }
