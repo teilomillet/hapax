@@ -1,20 +1,22 @@
 package metrics
 
 import (
+	"net/http"
+
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"net/http"
 )
 
 // Metrics encapsulates Prometheus metrics for the server.
 type Metrics struct {
-	registry       *prometheus.Registry
-	RequestsTotal  *prometheus.CounterVec
+	registry        *prometheus.Registry
+	RequestsTotal   *prometheus.CounterVec
 	RequestDuration *prometheus.HistogramVec
-	ActiveRequests *prometheus.GaugeVec
-	ErrorsTotal    *prometheus.CounterVec
-	RateLimitHits  *prometheus.CounterVec
+	ActiveRequests  *prometheus.GaugeVec
+	ErrorsTotal     *prometheus.CounterVec
+	RateLimitHits   *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance with a custom registry.
@@ -63,8 +65,8 @@ func NewMetrics() *Metrics {
 	}
 
 	// Register default Go metrics
-	registry.MustRegister(prometheus.NewGoCollector())
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	return m
 }
