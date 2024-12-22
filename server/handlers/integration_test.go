@@ -33,7 +33,7 @@ func TestCompletionHandlerIntegration(t *testing.T) {
 	// Create mock LLM
 	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
 		// If context has timeout header, simulate timeout
-		if ctx.Value("X-Test-Timeout") != nil {
+		if ctx.Value(middleware.XTestTimeoutKey) != nil {
 			// Sleep longer than the timeout
 			time.Sleep(5 * time.Second)
 		}

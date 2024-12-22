@@ -10,6 +10,7 @@ import (
 
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
+	"github.com/teilomillet/hapax/server/middleware"
 )
 
 // Processor handles request processing and response formatting for LLM interactions.
@@ -25,7 +26,7 @@ import (
 // The Processor is designed to be reusable across different request types
 // while maintaining consistent formatting and error handling.
 type Processor struct {
-	llm           gollm.LLM                    // The LLM instance to use for generation
+	llm           gollm.LLM                     // The LLM instance to use for generation
 	templates     map[string]*template.Template // Compiled templates for request formatting
 	config        *config.ProcessingConfig      // Configuration for processing behavior
 	defaultPrompt string                        // Default system prompt for all requests
@@ -122,7 +123,7 @@ func (p *Processor) ProcessRequest(ctx context.Context, req *Request) (*Response
 
 	// Pass timeout header to LLM context if present
 	if timeoutHeader := ctx.Value("X-Test-Timeout"); timeoutHeader != nil {
-		ctx = context.WithValue(ctx, "X-Test-Timeout", timeoutHeader)
+		ctx = context.WithValue(ctx, middleware.XTestTimeoutKey, timeoutHeader)
 	}
 
 	// Send request to LLM

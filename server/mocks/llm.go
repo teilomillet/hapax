@@ -7,6 +7,7 @@ import (
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/gollm/llm"
 	"github.com/teilomillet/gollm/utils"
+	"github.com/teilomillet/hapax/server/middleware"
 )
 
 // MockLLM implements a mock LLM for testing purposes.
@@ -24,9 +25,9 @@ import (
 //	})
 type MockLLM struct {
 	GenerateFunc func(context.Context, *gollm.Prompt) (string, error)
-	DebugFunc   func(string, ...interface{})
-	Provider    string // Provider name for testing
-	Model       string // Model name for testing
+	DebugFunc    func(string, ...interface{})
+	Provider     string // Provider name for testing
+	Model        string // Model name for testing
 }
 
 // NewMockLLM creates a new MockLLM with optional generate function.
@@ -34,8 +35,8 @@ type MockLLM struct {
 func NewMockLLM(generateFunc func(context.Context, *gollm.Prompt) (string, error)) *MockLLM {
 	return &MockLLM{
 		GenerateFunc: generateFunc,
-		Provider:    "mock",
-		Model:       "mock-model",
+		Provider:     "mock",
+		Model:        "mock-model",
 	}
 }
 
@@ -43,8 +44,8 @@ func NewMockLLM(generateFunc func(context.Context, *gollm.Prompt) (string, error
 func NewMockLLMWithConfig(provider, model string, generateFunc func(context.Context, *gollm.Prompt) (string, error)) *MockLLM {
 	return &MockLLM{
 		GenerateFunc: generateFunc,
-		Provider:    provider,
-		Model:       model,
+		Provider:     provider,
+		Model:        model,
 	}
 }
 
@@ -53,7 +54,7 @@ func NewMockLLMWithConfig(provider, model string, generateFunc func(context.Cont
 // The opts parameter is ignored in the mock to simplify testing.
 func (m *MockLLM) Generate(ctx context.Context, prompt *gollm.Prompt, opts ...llm.GenerateOption) (string, error) {
 	// Check for timeout header
-	if ctx.Value("X-Test-Timeout") != nil {
+	if ctx.Value(middleware.XTestTimeoutKey) != nil {
 		// Sleep longer than the timeout
 		time.Sleep(10 * time.Second)
 		return "", context.DeadlineExceeded

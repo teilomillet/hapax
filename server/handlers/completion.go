@@ -343,7 +343,7 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create context with timeout header if present
 	ctx := r.Context()
 	if timeoutHeader := r.Header.Get("X-Test-Timeout"); timeoutHeader != "" {
-		ctx = context.WithValue(ctx, "X-Test-Timeout", timeoutHeader)
+		ctx = context.WithValue(ctx, middleware.XTestTimeoutKey, timeoutHeader)
 		r = r.WithContext(ctx)
 	}
 
