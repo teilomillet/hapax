@@ -7,12 +7,18 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -21,7 +27,9 @@ jobs:
           cache: true
     
       - name: Install dependencies
-        run: go mod download
+        run: |
+          go mod download
+          go install golang.org/x/tools/cmd/goimports@latest
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
@@ -31,12 +39,16 @@ jobs:
         with:
           version: latest
           args: --timeout=5m
+          # Only show new issues for pull requests
+          only-new-issues: true
 
       - name: Upload coverage
+        if: success()
         uses: codecov/codecov-action@v3
         with:
           file: ./coverage.txt
-          fail_ci_if_error: true
+          fail_ci_if_error: false
+          verbose: true
 
   build:
     name: Build Binary
@@ -44,6 +56,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -53,13 +67,15 @@ jobs:
 
       - name: Build
         run: |
-          go build -v -ldflags="-X 'main.Version=$(git describe --tags)'" ./...
+          VERSION=$(git describe --tags --always --dirty)
+          go build -v -ldflags="-X main.Version=${VERSION}" -o hapax ./...
         
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
           name: hapax-binary
           path: ./hapax
+          retention-days: 5
 
   release:
     name: Create Release
@@ -79,30 +95,37 @@ jobs:
           echo "" >> $GITHUB_ENV
           
           # Features
-          echo "### Features ✨" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^feat' | sed 's/feat: /* /' >> $GITHUB_ENV
+          echo "### Features" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^feat' | sed 's/feat: /* /' >> $GITHUB_ENV || true
           
           # Fixes
           echo "" >> $GITHUB_ENV
-          echo "### Bug Fixes 🐛" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^fix' | sed 's/fix: /* /' >> $GITHUB_ENV
+          echo "### Fixes" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^fix' | sed 's/fix: /* /' >> $GITHUB_ENV || true
           
           # Documentation
           echo "" >> $GITHUB_ENV
-          echo "### Documentation 📚" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^docs' | sed 's/docs: /* /' >> $GITHUB_ENV
+          echo "### Documentation" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^docs' | sed 's/docs: /* /' >> $GITHUB_ENV || true
           
           # Performance
           echo "" >> $GITHUB_ENV
-          echo "### Performance Improvements ⚡" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^perf' | sed 's/perf: /* /' >> $GITHUB_ENV
+          echo "### Performance Improvements" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^perf' | sed 's/perf: /* /' >> $GITHUB_ENV || true
           
           echo "EOF" >> $GITHUB_ENV
+
+      - name: Download binary
+        uses: actions/download-artifact@v3
+        with:
+          name: hapax-binary
+          path: ./
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           body: ${{ env.CHANGELOG }}
+          files: ./hapax
           draft: false
           prerelease: false
           generate_release_notes: true

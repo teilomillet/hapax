@@ -1,0 +1,50 @@
+run:
+  timeout: 5m
+  tests: true
+  # Include test files for analysis
+  build-tags:
+    - integration
+
+linters:
+  disable-all: true
+  enable:
+    - gofmt
+    - govet
+    - revive      # Modern replacement for golint
+    - gosimple
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unconvert
+    - misspell
+    - gosec
+    - bodyclose   # Checks whether HTTP response bodies are closed
+    - gocyclo     # Check function complexity
+    - goimports   # Checks imports ordering
+    - unused      # Checks for unused constants, variables, functions and types
+
+linters-settings:
+  gocyclo:
+    # Minimal complexity of function to report
+    min-complexity: 15
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - "checkPrivateReceivers"
+          - "sayRepetitiveInsteadOf"
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
