@@ -8,11 +8,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type contextKey string
-
-// RequestIDKey is the key used to store the request ID in the context.
-const RequestIDKey contextKey = "request_id"
-
 // RequestID middleware adds a unique request ID to the context
 // and sets it in the response header.
 func RequestID(next http.Handler) http.Handler {
