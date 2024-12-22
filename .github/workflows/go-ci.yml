@@ -3,7 +3,9 @@ name: Go CI/CD
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
+    tags: 
+      - 'v0.[1-9][0-9]*.[0-9]+'  # Matches v0.1.0, v0.2.0, v0.10.0, etc.
+      - 'v0.[1-9][0-9]*.[0-9]+[0-9]'  # Also matches v0.1.10, v0.2.23, etc.
   pull_request:
     branches: [ main ]
 
