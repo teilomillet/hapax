@@ -283,7 +283,7 @@ go test ./...
 
 ## License
 
-MIT License
+APACHE License 2.0
 
 ## Contributing
 
