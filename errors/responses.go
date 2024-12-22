@@ -5,6 +5,8 @@ import (
 	"errors"
 )
 
+const RequestIDKey = "request_id"
+
 // ErrorResponse represents a standardized error response format
 // that is returned to clients when an error occurs. It includes:
 //   - Error type for categorization

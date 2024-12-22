@@ -30,7 +30,7 @@ func ErrorHandler(logger *zap.Logger) func(http.Handler) http.Handler {
 					logger.Error("panic recovered",
 						zap.Any("error", err),
 						zap.ByteString("stacktrace", stack),
-						zap.String("request_id", r.Header.Get("X-Request-ID")),
+						zap.String(string(RequestIDKey), r.Header.Get("X-Request-ID")),
 					)
 
 					hapaxErr := NewInternalError(r.Header.Get("X-Request-ID"), nil)
@@ -59,13 +59,13 @@ func LogError(logger *zap.Logger, err error, requestID string) {
 			zap.String("error_type", string(hapaxErr.Type)),
 			zap.String("message", hapaxErr.Message),
 			zap.Int("code", hapaxErr.Code),
-			zap.String("request_id", requestID),
+			zap.String(string(RequestIDKey), requestID),
 			zap.Any("details", hapaxErr.Details),
 		)
 	} else {
 		logger.Error("unexpected error",
 			zap.Error(err),
-			zap.String("request_id", requestID),
+			zap.String(string(RequestIDKey), requestID),
 		)
 	}
 }

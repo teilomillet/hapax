@@ -17,6 +17,7 @@ import (
 
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/middleware"
 	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap"
 )
@@ -102,7 +103,7 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		details["allowed_methods"] = []string{"POST"}
 		errors.WriteError(w, errors.NewValidationError(
-			r.Context().Value("request_id").(string),
+			r.Context().Value(middleware.RequestIDKey).(string),
 			"Method not allowed",
 			details,
 		))
@@ -113,7 +114,7 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
 		var requestID string
-		if id := r.Context().Value("request_id"); id != nil {
+		if id := r.Context().Value(middleware.RequestIDKey); id != nil {
 			requestID = id.(string)
 		}
 		w.WriteHeader(http.StatusBadRequest)
@@ -129,7 +130,7 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Get request ID from context, use empty string if not present
 	var requestID string
-	if id := r.Context().Value("request_id"); id != nil {
+	if id := r.Context().Value(middleware.RequestIDKey); id != nil {
 		requestID = id.(string)
 	}
 

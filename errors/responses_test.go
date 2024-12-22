@@ -25,7 +25,7 @@ func TestWriteError(t *testing.T) {
 			},
 			expectedCode: http.StatusUnauthorized,
 			expectedType: AuthError,
-			expectedFields: []string{"type", "message", "request_id"},
+			expectedFields: []string{"type", "message", string(RequestIDKey)},
 		},
 		{
 			name: "error with details",
@@ -41,7 +41,7 @@ func TestWriteError(t *testing.T) {
 			},
 			expectedCode: http.StatusBadRequest,
 			expectedType: ValidationError,
-			expectedFields: []string{"type", "message", "request_id", "details"},
+			expectedFields: []string{"type", "message", string(RequestIDKey), "details"},
 		},
 	}
 

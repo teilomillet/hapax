@@ -27,7 +27,7 @@ func Recovery(logger *zap.Logger) func(http.Handler) http.Handler {
 					)
 					
 					// Retrieve the request ID from the context
-					requestID := r.Context().Value("request_id").(string)
+					requestID := r.Context().Value(RequestIDKey).(string)
 					// Write an internal server error response
 					errors.WriteError(w, errors.NewInternalError(
 						requestID,

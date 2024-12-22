@@ -69,7 +69,7 @@ func RateLimit(metrics *metrics.Metrics) func(http.Handler) http.Handler {
 				// If the request is not allowed, increment the rate limit hit metric.
 				metrics.RateLimitHits.WithLabelValues(ip).Inc()
 				var requestID string
-				if id := r.Context().Value("request_id"); id != nil {
+				if id := r.Context().Value(RequestIDKey); id != nil {
 					requestID = id.(string)
 				}
 

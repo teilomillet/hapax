@@ -111,7 +111,7 @@ type HapaxError struct {
 	Code int `json:"-"`
 
 	// RequestID links the error to a specific request
-	RequestID string `json:"request_id"`
+	RequestID string `json:"RequestIDKey"`
 
 	// Details contains additional error context
 	Details map[string]interface{} `json:"details,omitempty"`

@@ -15,6 +15,7 @@ import (
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/middleware"
 	"github.com/teilomillet/hapax/server/mocks"
 	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap/zaptest"
@@ -121,9 +122,9 @@ func TestCompletionHandler(t *testing.T) {
 			},
 		},
 		{
-			name:        "invalid json in request",
-			requestType: "",
-			requestBody: "invalid json",
+			name:           "invalid json in request",
+			requestType:    "",
+			requestBody:    "invalid json",
 			expectedStatus: http.StatusBadRequest,
 			expectedError: &errors.ErrorResponse{
 				Type:      errors.ValidationError,
@@ -146,8 +147,8 @@ func TestCompletionHandler(t *testing.T) {
 				Message:   "Input too large",
 				RequestID: "test-123",
 				Details: map[string]interface{}{
-					"type": "default",
-					"max_size": "512KB",
+					"type":        "default",
+					"max_size":    "512KB",
 					"actual_size": "1MB",
 				},
 			},
@@ -204,8 +205,8 @@ func TestCompletionHandler(t *testing.T) {
 				Message:   "Function description too large",
 				RequestID: "test-123",
 				Details: map[string]interface{}{
-					"type": "function",
-					"max_size": "5KB",
+					"type":        "function",
+					"max_size":    "5KB",
 					"actual_size": "10KB",
 				},
 			},
@@ -253,7 +254,7 @@ func TestCompletionHandler(t *testing.T) {
 
 			// Create test request with context
 			req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-			req = req.WithContext(context.WithValue(req.Context(), "request_id", "test-123"))
+			req = req.WithContext(context.WithValue(req.Context(), middleware.RequestIDKey, "test-123"))
 			req.Header.Set("Content-Type", "application/json")
 
 			// Record response
@@ -268,7 +269,7 @@ func TestCompletionHandler(t *testing.T) {
 				var gotError errors.ErrorResponse
 				err := json.NewDecoder(w.Body).Decode(&gotError)
 				require.NoError(t, err)
-				
+
 				// Compare error fields
 				assert.Equal(t, tt.expectedError.Type, gotError.Type)
 				assert.Equal(t, tt.expectedError.Message, gotError.Message)

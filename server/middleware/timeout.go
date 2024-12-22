@@ -96,7 +96,7 @@ func Timeout(timeout time.Duration) func(http.Handler) http.Handler {
 				if !tw.hasWritten() {
 					// Only write error if nothing has been written yet
 					var requestID string
-					if id := r.Context().Value("request_id"); id != nil {
+					if id := r.Context().Value(RequestIDKey); id != nil {
 						requestID = id.(string)
 					}
 

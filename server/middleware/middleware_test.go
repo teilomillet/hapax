@@ -15,7 +15,7 @@ import (
 func TestRequestID(t *testing.T) {
 	handler := middleware.RequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Handler should see request ID in context
-		requestID := r.Context().Value("request_id").(string)
+		requestID := r.Context().Value(middleware.RequestIDKey).(string)
 		assert.NotEmpty(t, requestID)
 		assert.Equal(t, requestID, w.Header().Get("X-Request-ID"))
 	}))
