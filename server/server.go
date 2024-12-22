@@ -76,9 +76,13 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(CompletionResponse{
+	if err := json.NewEncoder(w).Encode(CompletionResponse{
 		Completion: resp,
-	})
+	}); err != nil {
+		// Use the existing error handling mechanism
+		errors.ErrorWithType(w, "Failed to encode response", errors.ProviderError, http.StatusInternalServerError)
+		return
+	}
 }
 
 // Router handles HTTP routing and middleware configuration.
@@ -115,9 +119,13 @@ func NewRouter(completion http.Handler) *Router {
 	// Health check endpoint for container orchestration
 	// Returns 200 OK with {"status": "ok"} when the service is healthy
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
+		if err := json.NewEncoder(w).Encode(map[string]string{
 			"status": "ok",
-		})
+		}); err != nil {
+			// Use the existing error handling mechanism
+			errors.ErrorWithType(w, "Failed to encode response", errors.ProviderError, http.StatusInternalServerError)
+			return
+		}
 	})
 
 	// Prometheus metrics endpoint

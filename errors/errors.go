@@ -159,12 +159,11 @@ func WriteError(w http.ResponseWriter, err *HapaxError) {
 		RequestID: err.RequestID,
 		Details:   err.Details,
 	}); encodeErr != nil {
-		// What do we do if encoding fails?
-		// Typically, you'd log the error
+		// Log the encoding error
 		zap.L().Error("Failed to encode error response", zap.Error(encodeErr))
 
-		// Optionally, try a fallback method
-		w.Write([]byte(`{"error": "Failed to encode error response"}`))
+		// Attempt to send a fallback error response using the existing error handling mechanism
+		ErrorWithType(w, "Failed to encode error response", ProviderError, http.StatusInternalServerError)
 	}
 }
 

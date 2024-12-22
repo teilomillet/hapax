@@ -218,7 +218,10 @@ func TestRouterWithMiddleware(t *testing.T) {
 	// Create a mock completion handler
 	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"completion":"test response"}`))
+		if _, err := w.Write([]byte(`{"completion":"test response"}`)); err != nil {
+			// Handle the error, e.g., log it or fail the test
+			t.Errorf("Failed to write response: %v", err)
+		}
 	})
 
 	router := NewRouter(mockHandler)
