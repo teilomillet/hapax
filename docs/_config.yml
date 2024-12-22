@@ -1,0 +1,13 @@
+title: Hapax
+description: Large Language Model Infrastructure, Simplified
+remote_theme: just-the-docs/just-the-docs
+
+color_scheme: dark
+
+search_enabled: true
+
+aux_links:
+  "Hapax on GitHub":
+    - "//github.com/teilomillet/hapax"
+
+aux_links_new_tab: true
