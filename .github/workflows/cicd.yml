@@ -1,0 +1,108 @@
+name: Go CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+    
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.txt
+          fail_ci_if_error: true
+
+  build:
+    name: Build Binary
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Build
+        run: |
+          go build -v -ldflags="-X 'main.Version=$(git describe --tags)'" ./...
+        
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: hapax-binary
+          path: ./hapax
+
+  release:
+    name: Create Release
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          echo "## What's Changed" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          
+          # Features
+          echo "### Features ✨" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^feat' | sed 's/feat: /* /' >> $GITHUB_ENV
+          
+          # Fixes
+          echo "" >> $GITHUB_ENV
+          echo "### Bug Fixes 🐛" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^fix' | sed 's/fix: /* /' >> $GITHUB_ENV
+          
+          # Documentation
+          echo "" >> $GITHUB_ENV
+          echo "### Documentation 📚" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^docs' | sed 's/docs: /* /' >> $GITHUB_ENV
+          
+          # Performance
+          echo "" >> $GITHUB_ENV
+          echo "### Performance Improvements ⚡" >> $GITHUB_ENV
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^perf' | sed 's/perf: /* /' >> $GITHUB_ENV
+          
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: ${{ env.CHANGELOG }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true

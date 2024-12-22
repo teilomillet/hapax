@@ -1,0 +1,27 @@
+linters:
+  enable:
+    - gofmt
+    - govet
+    - golint
+    - gosimple
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unconvert
+    - misspell
+    - gosec
+
+run:
+  deadline: 5m
+  tests: true
+  modules-download-mode: readonly
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
