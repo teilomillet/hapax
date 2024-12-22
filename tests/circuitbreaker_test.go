@@ -122,15 +122,32 @@ func TestCircuitBreaker(t *testing.T) {
 		cb, err := newCB()
 		require.NoError(t, err)
 
+		// Track failures explicitly
+		var failureCount int
+		var successCount int
+
 		// Execute a mix of successful and failed requests
 		for i := 0; i < 3; i++ {
-			cb.Execute(func() error {
+			execErr := cb.Execute(func() error {
 				if i%2 == 0 {
 					return errors.New("failure")
 				}
 				return nil
 			})
+
+			// Explicitly handle the error return
+			if execErr != nil {
+				failureCount++
+				// Optional: log or make specific assertions about the error
+				t.Logf("Execution %d failed: %v", i, execErr)
+			} else {
+				successCount++
+			}
 		}
+
+		// Now we can make more precise assertions
+		assert.Equal(t, 2, failureCount, "Expected 2 failures")
+		assert.Equal(t, 1, successCount, "Expected 1 success")
 
 		counts := cb.Counts()
 		assert.True(t, counts.TotalFailures > 0)

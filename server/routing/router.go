@@ -114,7 +114,7 @@ func (r *Router) setupRoutes() {
 			if route.HealthCheck != nil {
 				healthPath := fmt.Sprintf("%s/health", path)
 				router.Get(healthPath, r.healthCheckHandler(route)) // Register health check handler
-				r.startHealthCheck(route) // Start health check routine
+				r.startHealthCheck(route)                           // Start health check routine
 			}
 		})
 	}
@@ -127,24 +127,33 @@ func (r *Router) setupRoutes() {
 }
 
 // healthCheckHandler returns a handler for route-specific health checks.
-// It checks the health state of the route and responds accordingly.
 func (r *Router) healthCheckHandler(route config.RouteConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		status := "healthy"
 		if v, ok := r.healthState.Load(route.Path); ok && !v.(bool) {
 			status = "unhealthy"
-			w.WriteHeader(http.StatusServiceUnavailable) // Respond with 503 if unhealthy
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": status}) // Encode health status as JSON
+
+		// Properly handle potential JSON encoding errors
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": status}); err != nil {
+			// Log the error and send a generic error response
+			r.logger.Error("Failed to encode health check response",
+				zap.String("route", route.Path),
+				zap.Error(err))
+
+			// Send a fallback error response
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 
 // globalHealthCheckHandler returns a handler for the global health check endpoint.
-// It checks the health of all routes and responds with their statuses.
 func (r *Router) globalHealthCheckHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		allHealthy := true
-		statuses := make(map[string]string) // Map to hold health statuses
+		statuses := make(map[string]string)
 
 		// Iterate through health states of all routes
 		r.healthState.Range(func(key, value interface{}) bool {
@@ -160,13 +169,25 @@ func (r *Router) globalHealthCheckHandler() http.HandlerFunc {
 		})
 
 		if !allHealthy {
-			w.WriteHeader(http.StatusServiceUnavailable) // Respond with 503 if any service is unhealthy
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		// Properly handle potential JSON encoding errors
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]interface{}{
 			"status":   map[string]bool{"global": allHealthy},
 			"services": statuses,
-		}) // Encode global health status as JSON
+		}
+
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			// Log the error and send a generic error response
+			r.logger.Error("Failed to encode global health check response",
+				zap.Bool("all_healthy", allHealthy),
+				zap.Error(err))
+
+			// Send a fallback error response
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 	}
 }
 

@@ -53,7 +53,13 @@ func TestDockerBuild(t *testing.T) {
 	cleanup := func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		exec.CommandContext(cleanupCtx, "docker", "rm", "-f", containerName).Run()
+
+		// Check the error return from Run()
+		if err := exec.CommandContext(cleanupCtx, "docker", "rm", "-f", containerName).Run(); err != nil {
+			// In a test, you typically want to log the error rather than fail the entire test
+			// unless the cleanup failure is critical
+			t.Logf("Failed to remove Docker container %s: %v", containerName, err)
+		}
 	}
 	cleanup() // Clean up any leftover containers
 	defer cleanup()
@@ -228,12 +234,24 @@ func TestDockerCompose(t *testing.T) {
 
 	// Enhanced cleanup to remove both containers and test config
 	cleanup := func() {
+		// Docker Compose cleanup with error handling
 		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", filepath.Join(projectRoot, "docker-compose.yml"), "down", "-v")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Run()
-		// Clean up the config file
-		os.Remove(filepath.Join(projectRoot, "config.yaml"))
+
+		if err := cmd.Run(); err != nil {
+			// Log the error without failing the test, as this is a cleanup step
+			t.Logf("Failed to remove Docker Compose containers: %v", err)
+		}
+
+		// Config file cleanup with error handling
+		configPath := filepath.Join(projectRoot, "config.yaml")
+		if err := os.Remove(configPath); err != nil {
+			// Only log if the error is not because the file doesn't exist
+			if !os.IsNotExist(err) {
+				t.Logf("Failed to remove config file %s: %v", configPath, err)
+			}
+		}
 	}
 	cleanup() // Clean up any leftover containers and files
 	defer cleanup()

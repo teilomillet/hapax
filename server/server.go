@@ -127,7 +127,9 @@ func NewRouter(completion http.Handler) *Router {
 	// - LLM request counts by provider/model
 	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		w.Write([]byte(`
+
+		// Check the error return from Write
+		if _, err := w.Write([]byte(`
 # HELP hapax_requests_total The total number of HTTP requests.
 # TYPE hapax_requests_total counter
 hapax_requests_total{code="200"} 10
@@ -145,7 +147,14 @@ hapax_request_duration_seconds_count 10
 # HELP hapax_llm_requests_total The total number of LLM requests.
 # TYPE hapax_llm_requests_total counter
 hapax_llm_requests_total{provider="openai",model="gpt-3.5-turbo"} 5
-`))
+`)); err != nil {
+			// In a real-world scenario, log the error
+			fmt.Printf("Failed to write metrics response: %v", err)
+
+			// Send an error response
+			http.Error(w, "Failed to generate metrics", http.StatusInternalServerError)
+			return
+		}
 	})
 
 	return router
@@ -353,39 +362,57 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func main() {
+	// Create logger with explicit error handling
 	logger, err := zap.NewProduction()
 	if err != nil {
-		fmt.Printf("Failed to create logger: %v\n", err)
-		return
+		// Fail fast if logger creation fails
+		fmt.Printf("Critical error: Failed to create logger: %v\n", err)
+		os.Exit(1)
 	}
-	defer logger.Sync()
+
+	// Ensure logger is synced, with robust error handling
+	defer func() {
+		if syncErr := logger.Sync(); syncErr != nil {
+			// Log sync failure, but don't mask the original error
+			fmt.Printf("Warning: Failed to sync logger: %v\n", syncErr)
+		}
+	}()
+
+	// Set global logger
 	errors.SetLogger(logger)
 
-	configPath := "config.yaml" // Or get from environment/flags
+	// Configuration and server setup with comprehensive error handling
+	configPath := "config.yaml"
 	server, err := NewServer(configPath, logger)
 	if err != nil {
-		logger.Fatal("Failed to create server",
+		logger.Fatal("Server initialization failed",
 			zap.Error(err),
+			zap.String("config_path", configPath),
 		)
 	}
 
-	// Handle graceful shutdown
+	// Graceful shutdown infrastructure
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle OS signals
+	// Signal handling with detailed logging
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		sig := <-sigChan
-		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+		logger.Info("Shutdown signal received",
+			zap.String("signal", sig.String()),
+			zap.String("action", "initiating graceful shutdown"),
+		)
 		cancel()
 	}()
 
+	// Server start with comprehensive error tracking
 	if err := server.Start(ctx); err != nil {
-		logger.Fatal("Server error",
+		logger.Fatal("Server startup or runtime error",
 			zap.Error(err),
+			zap.String("action", "server_start_failed"),
 		)
 	}
 }

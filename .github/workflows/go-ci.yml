@@ -39,11 +39,9 @@ jobs:
         with:
           version: latest
           args: |
-            --timeout=5m  
-            --disable-all
+            --timeout=5m
             --out-format=colored-line-number
             --issues-exit-code=1
-          # Only show new issues for pull requests
           only-new-issues: true
           skip-pkg-cache: true
           skip-build-cache: false

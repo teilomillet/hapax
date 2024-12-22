@@ -98,10 +98,14 @@ func TestRouter_VersionedRouting(t *testing.T) {
 	}
 	handlers := map[string]http.Handler{
 		"test": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("v1"))
+			if _, err := w.Write([]byte("v1")); err != nil {
+				t.Fatalf("Failed to write response: %v", err)
+			}
 		}),
 		"test2": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("v2"))
+			if _, err := w.Write([]byte("v2")); err != nil {
+				t.Fatalf("Failed to write response: %v", err)
+			}
 		}),
 	}
 	logger := zap.NewNop()

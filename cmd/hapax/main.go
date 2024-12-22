@@ -35,7 +35,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create logger: %v", err)
 	}
-	defer logger.Sync()
+	defer func() {
+		if err := logger.Sync(); err != nil {
+			// Log sync failure, but use fmt.Fprintf to stderr since the zap logger might be unavailable
+			fmt.Fprintf(os.Stderr, "Failed to sync logger: %v\n", err)
+		}
+	}()
 
 	// Load configuration
 	cfg, err := config.LoadFile(*configFile)

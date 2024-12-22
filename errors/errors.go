@@ -152,13 +152,20 @@ func WriteError(w http.ResponseWriter, err *HapaxError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(err.Code)
 
-	// Convert HapaxError to ErrorResponse and write it
-	json.NewEncoder(w).Encode(&ErrorResponse{
+	// Check the error return from Encode
+	if encodeErr := json.NewEncoder(w).Encode(&ErrorResponse{
 		Type:      err.Type,
 		Message:   err.Message,
 		RequestID: err.RequestID,
 		Details:   err.Details,
-	})
+	}); encodeErr != nil {
+		// What do we do if encoding fails?
+		// Typically, you'd log the error
+		zap.L().Error("Failed to encode error response", zap.Error(encodeErr))
+
+		// Optionally, try a fallback method
+		w.Write([]byte(`{"error": "Failed to encode error response"}`))
+	}
 }
 
 // Error is a drop-in replacement for http.Error that creates and writes
