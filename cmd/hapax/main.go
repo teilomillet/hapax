@@ -9,9 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/server"
+	"go.uber.org/zap"
 )
 
 var (
@@ -20,7 +20,7 @@ var (
 	version    = flag.Bool("version", false, "Print version and exit")
 )
 
-const Version = "v0.0.2-alpha"
+const Version = "v0.0.16"
 
 func main() {
 	flag.Parse()
@@ -30,10 +30,20 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Create logger
+	logger, err := zap.NewProduction()
+	if err != nil {
+		log.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Sync()
+
 	// Load configuration
 	cfg, err := config.LoadFile(*configFile)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		logger.Fatal("Failed to load config",
+			zap.Error(err),
+			zap.String("config_file", *configFile),
+		)
 	}
 
 	// Just validate and exit if requested
@@ -42,20 +52,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create LLM client based on config
-	llm, err := createLLM(cfg.LLM)
+	// Create server with config path and logger
+	srv, err := server.NewServer(*configFile, logger)
 	if err != nil {
-		log.Fatalf("Failed to create LLM client: %v", err)
+		logger.Fatal("Failed to create server",
+			zap.Error(err),
+		)
 	}
-
-	// Create completion handler
-	handler := server.NewCompletionHandler(llm)
-
-	// Create router with configured routes
-	router := server.NewRouter(handler)
-
-	// Create server
-	srv := server.NewServer(cfg.Server, router)
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -65,41 +68,19 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Received shutdown signal")
+		logger.Info("Received shutdown signal")
 		cancel()
 	}()
 
 	// Start server
-	log.Printf("Starting hapax %s on port %d", Version, cfg.Server.Port)
-	if err := srv.Start(ctx); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
-}
-
-func createLLM(cfg config.LLMConfig) (gollm.LLM, error) {
-	// Get API key from config or environment
-	apiKey := cfg.APIKey
-	log.Printf("API Key from config: %q", apiKey)
-	
-	if apiKey == "" {
-		// Try environment variable as fallback
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-		log.Printf("API Key from env: %q", apiKey)
-		if apiKey == "" {
-			return nil, fmt.Errorf("no API key provided in config or ANTHROPIC_API_KEY environment variable")
-		}
-	}
-
-	log.Printf("Creating LLM with provider=%s model=%s api_key_length=%d", cfg.Provider, cfg.Model, len(apiKey))
-
-	// Create LLM with configuration
-	llm, err := gollm.NewLLM(
-		gollm.SetProvider(cfg.Provider),
-		gollm.SetModel(cfg.Model),
+	logger.Info("Starting hapax",
+		zap.String("version", Version),
+		zap.Int("port", cfg.Server.Port),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("create LLM: %w", err)
-	}
 
-	return llm, nil
+	if err := srv.Start(ctx); err != nil {
+		logger.Fatal("Server error",
+			zap.Error(err),
+		)
+	}
 }

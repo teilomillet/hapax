@@ -6,7 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -79,8 +84,8 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Router handles HTTP routing and middleware configuration.
 // It sets up all endpoints and applies common middleware to requests.
 type Router struct {
-	router     chi.Router      // Chi router for flexible routing
-	completion http.Handler    // Handler for completion requests
+	router     chi.Router   // Chi router for flexible routing
+	completion http.Handler // Handler for completion requests
 }
 
 // NewRouter creates a new router with all endpoints configured.
@@ -93,10 +98,10 @@ func NewRouter(completion http.Handler) *Router {
 	r := chi.NewRouter()
 
 	// Add middleware stack for all requests
-	r.Use(middleware.RequestID)    // Adds unique ID to each request
-	r.Use(middleware.RequestTimer) // Tracks request duration
+	r.Use(middleware.RequestID)     // Adds unique ID to each request
+	r.Use(middleware.RequestTimer)  // Tracks request duration
 	r.Use(middleware.PanicRecovery) // Recovers from panics gracefully
-	r.Use(middleware.CORS)         // Enables cross-origin requests
+	r.Use(middleware.CORS)          // Enables cross-origin requests
 
 	router := &Router{
 		router:     r,
@@ -154,50 +159,197 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 // Server represents the HTTP server instance.
 // It wraps the standard library's http.Server with our configuration.
+// The running boolean tracks whether the server is operational, while the mu mutex protects concurrent access to this state.
+// This ensures that multiple goroutines do not interfere with each other when checking or updating the server's status.
 type Server struct {
 	httpServer *http.Server
+	config     config.Watcher
+	logger     *zap.Logger
+	llm        gollm.LLM
+	running    bool       // Track server state
+	mu         sync.Mutex // Protect state changes
 }
 
 // NewServer creates a new server with the specified configuration and handler.
 // It configures timeouts and limits based on the provided configuration.
-func NewServer(cfg config.ServerConfig, handler http.Handler) *Server {
-	return &Server{
-		httpServer: &http.Server{
-			Addr:           fmt.Sprintf(":%d", cfg.Port),
-			Handler:        handler,
-			ReadTimeout:    cfg.ReadTimeout,
-			WriteTimeout:   cfg.WriteTimeout,
-			MaxHeaderBytes: cfg.MaxHeaderBytes,
-		},
+func NewServer(configPath string, logger *zap.Logger) (*Server, error) {
+	configWatcher, err := config.NewConfigWatcher(configPath, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create config watcher: %w", err)
+	}
+
+	// Create initial LLM instance
+	initialConfig := configWatcher.GetCurrentConfig()
+	llm, err := gollm.NewLLM(gollm.SetProvider(initialConfig.LLM.Provider))
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize LLM: %w", err)
+	}
+
+	s := &Server{
+		logger: logger,
+		config: configWatcher,
+		llm:    llm,
+	}
+
+	// Initialize server with current config
+	if err := s.updateServerConfig(initialConfig); err != nil {
+		return nil, err
+	}
+
+	// Subscribe to config changes
+	configChan := configWatcher.Subscribe()
+	go s.handleConfigUpdates(configChan)
+
+	return s, nil
+}
+
+// NewServerWithConfig for testing now takes care of the LLM
+func NewServerWithConfig(cfg config.Watcher, llm gollm.LLM, logger *zap.Logger) (*Server, error) {
+	s := &Server{
+		logger: logger,
+		config: cfg,
+		llm:    llm,
+	}
+
+	// Initialize server with current config
+	if err := s.updateServerConfig(cfg.GetCurrentConfig()); err != nil {
+		return nil, err
+	}
+
+	// Subscribe to config changes
+	configChan := cfg.Subscribe()
+	go s.handleConfigUpdates(configChan)
+
+	return s, nil
+}
+
+// updateServerConfig updates the server configuration and handles graceful shutdown.
+// When a new configuration is received, it first checks if the server is running.
+// If it is, it initiates a graceful shutdown to close existing connections before applying the new configuration.
+// This ensures that there are no disruptions during the transition to the new configuration.
+func (s *Server) updateServerConfig(cfg *config.Config) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create new handler and router
+	handler := NewCompletionHandler(s.llm)
+	router := NewRouter(handler)
+
+	// Create new HTTP server with updated config
+	newServer := &http.Server{
+		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:        router,
+		ReadTimeout:    cfg.Server.ReadTimeout,
+		WriteTimeout:   cfg.Server.WriteTimeout,
+		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
+	}
+
+	// If server is running, we need to stop it and start the new one
+	if s.running {
+		// Gracefully shutdown existing server
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("failed to shutdown existing server: %w", err)
+		}
+	}
+
+	// Update server instance
+	s.httpServer = newServer
+
+	// If we were running before, start the new server
+	if s.running {
+		go func() {
+			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+				s.logger.Error("Server error", zap.Error(err))
+			}
+		}()
+
+		// Wait for server to be ready
+		if err := s.waitForServer(cfg.Server.Port); err != nil {
+			return fmt.Errorf("server failed to start on new port: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// waitForServer checks if the server is ready on its new port.
+// It attempts to connect multiple times to ensure that the server is fully initialized before proceeding.
+// This is crucial for confirming that the service is operational in its new location (port).
+func (s *Server) waitForServer(port int) error {
+	for i := 0; i < 50; i++ { // Try for 5 seconds (50 * 100ms)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("server failed to start within timeout")
+}
+
+// handleConfigUpdates listens for configuration changes and processes them.
+// When a new configuration is received, it updates the server's settings and manages the lifecycle of the server accordingly.
+// This includes shutting down the existing server and starting a new one with the updated configuration.
+func (s *Server) handleConfigUpdates(configChan <-chan *config.Config) {
+	for newConfig := range configChan {
+		s.logger.Info("Received config update")
+
+		// Update LLM if provider changed
+		if newConfig.LLM.Provider != s.llm.GetProvider() {
+			newLLM, err := gollm.NewLLM(gollm.SetProvider(newConfig.LLM.Provider))
+			if err != nil {
+				s.logger.Error("Failed to update LLM provider", zap.Error(err))
+				continue
+			}
+			s.llm = newLLM
+		}
+
+		// Create temporary server with new config
+		tempServer := &http.Server{}
+		if err := s.updateServerConfig(newConfig); err != nil {
+			s.logger.Error("Failed to update server config", zap.Error(err))
+			continue
+		}
+
+		// Gracefully shutdown existing connections
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			s.logger.Error("Error during server shutdown", zap.Error(err))
+		}
+		cancel()
+
+		// Start server with new configuration
+		s.httpServer = tempServer
+		go func() {
+			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+				s.logger.Error("Server error", zap.Error(err))
+			}
+		}()
+
+		s.logger.Info("Server restarted with new configuration")
 	}
 }
 
 // Start begins serving HTTP requests and blocks until shutdown.
-// It handles graceful shutdown when the context is cancelled.
+// It handles graceful shutdown when the context is cancelled, ensuring that all connections are properly closed before exiting.
 func (s *Server) Start(ctx context.Context) error {
-	errChan := make(chan error, 1)
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
 
-	go func() {
-		errors.DefaultLogger.Info("Server started", zap.String("address", s.httpServer.Addr))
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("server error: %w", err)
-		}
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
 	}()
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		errors.DefaultLogger.Info("Shutting down server")
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("error during server shutdown: %w", err)
-		}
-		return nil
-
-	case err := <-errChan:
-		return err
+	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
 	}
+	return nil
 }
 
 func main() {
@@ -209,21 +361,30 @@ func main() {
 	defer logger.Sync()
 	errors.SetLogger(logger)
 
-	cfg := config.DefaultConfig()
-
-	llm, err := gollm.NewLLM(gollm.SetProvider("ollama"))
+	configPath := "config.yaml" // Or get from environment/flags
+	server, err := NewServer(configPath, logger)
 	if err != nil {
-		errors.DefaultLogger.Fatal("Failed to initialize LLM",
+		logger.Fatal("Failed to create server",
 			zap.Error(err),
 		)
 	}
 
-	handler := NewCompletionHandler(llm)
-	router := NewRouter(handler)
-	server := NewServer(cfg.Server, router)
+	// Handle graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if err := server.Start(context.Background()); err != nil {
-		errors.DefaultLogger.Fatal("Server error",
+	// Handle OS signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		logger.Info("Received shutdown signal", zap.String("signal", sig.String()))
+		cancel()
+	}()
+
+	if err := server.Start(ctx); err != nil {
+		logger.Fatal("Server error",
 			zap.Error(err),
 		)
 	}

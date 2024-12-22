@@ -11,7 +11,7 @@ import (
 // MockLLM implements a mock LLM for testing purposes
 type MockLLM struct {
 	GenerateFunc func(context.Context, *gollm.Prompt) (string, error)
-	DebugFunc   func(string, ...interface{})
+	DebugFunc    func(string, ...interface{})
 }
 
 // NewMockLLM creates a new MockLLM with optional generate function

@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +18,36 @@ import (
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/mocks"
+	"go.uber.org/zap"
 )
 
-// TestCompletionHandler tests the completion handler
+// MockConfigWatcher implements a test version of the configuration watcher
+type MockConfigWatcher struct {
+	currentConfig atomic.Value
+}
+
+func NewMockConfigWatcher(cfg *config.Config) *MockConfigWatcher {
+	mcw := &MockConfigWatcher{}
+	mcw.currentConfig.Store(cfg)
+	return mcw
+}
+
+func (m *MockConfigWatcher) GetCurrentConfig() *config.Config {
+	return m.currentConfig.Load().(*config.Config)
+}
+
+func (m *MockConfigWatcher) Subscribe() <-chan *config.Config {
+	return make(chan *config.Config)
+}
+
+func (m *MockConfigWatcher) Close() error {
+	return nil
+}
+
+// TestCompletionHandler tests the completion handler for various scenarios.
+// It includes tests for invalid methods, invalid JSON input, missing prompts, LLM errors, and successful completions.
+// Each test checks the response status and body to ensure the handler behaves as expected.
 func TestCompletionHandler(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -139,7 +168,9 @@ func TestCompletionHandler(t *testing.T) {
 	}
 }
 
-// TestRouter tests the router
+// TestRouter tests the router's endpoints and their expected responses.
+// It verifies the behavior of the completion endpoint, health check, and handling of invalid routes.
+// Each test checks the response status to ensure the router is correctly configured.
 func TestRouter(t *testing.T) {
 	llm := &MockLLM{}
 	completionHandler := NewCompletionHandler(llm)
@@ -241,20 +272,50 @@ func TestRouterWithMiddleware(t *testing.T) {
 	}
 }
 
-// TestServer tests server lifecycle
+// TestServer tests the server lifecycle, including starting and stopping the server.
+// It ensures that the server can handle configuration updates without service interruption.
+// This includes verifying that the server shuts down gracefully and starts correctly with new settings.
 func TestServer(t *testing.T) {
-	cfg := config.ServerConfig{
-		Port:            8081,
-		ReadTimeout:     10 * time.Second,
-		WriteTimeout:    10 * time.Second,
-		MaxHeaderBytes:  1 << 20,
-		ShutdownTimeout: 30 * time.Second,
+	// Create a complete configuration for testing
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Port:            8081,
+			ReadTimeout:     10 * time.Second,
+			WriteTimeout:    10 * time.Second,
+			MaxHeaderBytes:  1 << 20,
+			ShutdownTimeout: 30 * time.Second,
+		},
+		LLM: config.LLMConfig{
+			Provider: "mock",
+			Model:    "test",
+		},
 	}
 
-	llm := &MockLLM{}
-	completionHandler := NewCompletionHandler(llm)
-	router := NewRouter(completionHandler)
-	server := NewServer(cfg, router)
+	// Create test logger
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+
+	// Create mock LLM with a test response
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "test response", nil
+	})
+
+	// Create mock config watcher
+	mockWatcher := mocks.NewMockConfigWatcher(cfg)
+
+	// Create server with mocked dependencies
+	server := &Server{
+		logger: logger,
+		config: mockWatcher,
+		llm:    mockLLM, // Store the mock LLM in the server
+	}
+
+	// Initialize server with current config
+	if err := server.updateServerConfig(cfg); err != nil {
+		t.Fatalf("Failed to update server config: %v", err)
+	}
 
 	// Create context with cancel for server lifecycle
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,15 +330,52 @@ func TestServer(t *testing.T) {
 	// Give server time to start
 	time.Sleep(100 * time.Millisecond)
 
-	// Send request to verify server is running
-	resp, err := http.Get("http://localhost:8081/health")
-	if err != nil {
-		t.Fatalf("Failed to connect to server: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Health check failed: got %v", resp.StatusCode)
-	}
+	t.Run("Health Check", func(t *testing.T) {
+		resp, err := http.Get("http://localhost:8081/health")
+		if err != nil {
+			t.Fatalf("Failed to connect to server: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Health check failed: got %v, want %v",
+				resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("Configuration Update", func(t *testing.T) {
+		// Create new configuration with different port
+		newCfg := &config.Config{
+			Server: config.ServerConfig{
+				Port:            8082,
+				ReadTimeout:     10 * time.Second,
+				WriteTimeout:    10 * time.Second,
+				MaxHeaderBytes:  1 << 20,
+				ShutdownTimeout: 30 * time.Second,
+			},
+			LLM: config.LLMConfig{
+				Provider: "mock",
+				Model:    "test",
+			},
+		}
+
+		// Update configuration
+		if err := server.updateServerConfig(newCfg); err != nil {
+			t.Fatalf("Failed to update server config: %v", err)
+		}
+
+		// The waitForServer method now ensures the server is ready before we test
+		resp, err := http.Get("http://localhost:8082/health")
+		if err != nil {
+			t.Fatalf("Failed to connect to server on new port: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Health check on new port failed: got %v, want %v",
+				resp.StatusCode, http.StatusOK)
+		}
+	})
 
 	// Trigger server shutdown
 	cancel()
@@ -330,5 +428,70 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ShutdownTimeout != 30*time.Second {
 		t.Errorf("unexpected default shutdown timeout: got %v want %v",
 			cfg.ShutdownTimeout, 30*time.Second)
+	}
+}
+
+func TestConfigWatcher(t *testing.T) {
+	// Create temporary config file for testing
+	tmpfile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	// Write initial configuration
+	initialConfig := `
+server:
+    port: 8081
+llm:
+    provider: "mock"
+    model: "test"
+`
+	if _, err := tmpfile.Write([]byte(initialConfig)); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+	tmpfile.Close()
+
+	// Create logger for testing
+	logger, _ := zap.NewDevelopment()
+
+	// Create config watcher
+	watcher, err := config.NewConfigWatcher(tmpfile.Name(), logger)
+	if err != nil {
+		t.Fatalf("Failed to create config watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	// Subscribe to configuration updates
+	updates := watcher.Subscribe()
+
+	// Verify initial configuration
+	cfg := watcher.GetCurrentConfig()
+	if cfg.Server.Port != 8081 {
+		t.Errorf("Unexpected initial port: got %v, want %v",
+			cfg.Server.Port, 8081)
+	}
+
+	// Write new configuration
+	newConfig := `
+server:
+    port: 8082
+llm:
+    provider: "mock"
+    model: "test"
+`
+	if err := os.WriteFile(tmpfile.Name(), []byte(newConfig), 0644); err != nil {
+		t.Fatalf("Failed to write new config: %v", err)
+	}
+
+	// Wait for configuration update
+	select {
+	case updatedConfig := <-updates:
+		if updatedConfig.Server.Port != 8082 {
+			t.Errorf("Unexpected updated port: got %v, want %v",
+				updatedConfig.Server.Port, 8082)
+		}
+	case <-time.After(time.Second):
+		t.Error("Timeout waiting for config update")
 	}
 }
