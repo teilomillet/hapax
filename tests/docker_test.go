@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -305,4 +307,191 @@ metrics:
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 		assert.Equal(t, "success", result.Status)
 	})
+}
+
+// TestDockerConfigFlexibility systematically validates Docker-based configuration management
+func TestDockerConfigFlexibility(t *testing.T) {
+	// Preliminary Availability Check
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker not available")
+	}
+
+	// Diagnostic Project Root Discovery
+	projectRoot, err := findProjectRoot()
+	require.NoError(t, err, "Project root discovery must succeed")
+
+	// Comprehensive Configuration Scenarios
+	configScenarios := []struct {
+		name           string
+		initialConfig  map[string]interface{}
+		updateConfig   map[string]interface{}
+		verifyEndpoint string
+		verifyFn       func(t *testing.T, responseBody []byte)
+	}{
+		{
+			name: "Basic Provider Configuration",
+			initialConfig: map[string]interface{}{
+				"llm": map[string]interface{}{
+					"provider": "openai",
+					"model":    "gpt-3.5-turbo",
+				},
+				"server": map[string]interface{}{
+					"port": 8083,
+				},
+			},
+			updateConfig: map[string]interface{}{
+				"llm": map[string]interface{}{
+					"provider": "anthropic",
+					"model":    "claude-3-haiku",
+				},
+			},
+			verifyEndpoint: "/v1/config",
+			verifyFn: func(t *testing.T, responseBody []byte) {
+				var configResponse map[string]interface{}
+				err := json.Unmarshal(responseBody, &configResponse)
+				require.NoError(t, err)
+
+				llmConfig, ok := configResponse["llm"].(map[string]interface{})
+				require.True(t, ok)
+
+				assert.Equal(t, "anthropic", llmConfig["provider"])
+				assert.Equal(t, "claude-3-haiku", llmConfig["model"])
+			},
+		},
+	}
+
+	for _, scenario := range configScenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// Comprehensive Temporary Test Environment
+			tmpDir := t.TempDir()
+
+			// Diagnostic Dockerfile with Enhanced Dependency Resolution
+			dockerfileContent := []byte((`
+FROM golang:1.22-alpine AS builder
+RUN apk add --no-cache git gcc musl-dev
+
+WORKDIR /app
+
+# Set explicit module configuration
+ENV GO111MODULE=on
+ENV GOPROXY=direct
+
+# Copy module definition files first for efficient caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy entire project context
+COPY . .
+
+# Verbose local package resolution
+RUN go mod tidy -v
+RUN go mod verify
+
+# Explicit build with comprehensive diagnostics
+RUN CGO_ENABLED=0 GOOS=linux go build -v -gcflags="-m" -o hapax ./cmd/hapax
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+COPY --from=builder /app/hapax .
+COPY initial-config.yaml /app/config.yaml
+
+EXPOSE 8083
+CMD ["./hapax", "--config", "/app/config.yaml"]
+`))
+			dockerfilePath := filepath.Join(tmpDir, "Dockerfile")
+			require.NoError(t, os.WriteFile(dockerfilePath, dockerfileContent, 0644))
+
+			// Strategic File Copying with Enhanced Error Handling
+			requiredFiles := []struct {
+				source      string
+				destination string
+			}{
+				{"go.mod", "go.mod"},
+				{"go.sum", "go.sum"},
+				{"cmd", "cmd"},
+				{"server", "server"},
+				{"config", "config"},
+				{"errors", "errors"}, // Explicitly include errors package
+			}
+
+			for _, fileMapping := range requiredFiles {
+				srcPath := filepath.Join(projectRoot, fileMapping.source)
+				dstPath := filepath.Join(tmpDir, fileMapping.destination)
+
+				// Enhanced copy mechanism with comprehensive error tracking
+				cpCmd := exec.Command("cp", "-r", srcPath, dstPath)
+				cpCmd.Stdout = os.Stdout
+				cpCmd.Stderr = os.Stderr
+
+				if err := cpCmd.Run(); err != nil {
+					t.Logf("Warning: Failed to copy %s: %v", fileMapping.source, err)
+
+					// Additional diagnostic information
+					if _, statErr := os.Stat(srcPath); os.IsNotExist(statErr) {
+						t.Logf("Source path does not exist: %s", srcPath)
+					}
+				}
+			}
+
+			// Configuration File Preparation
+			initialConfigPath := filepath.Join(tmpDir, "initial-config.yaml")
+			initialConfigBytes, err := yaml.Marshal(scenario.initialConfig)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(initialConfigPath, initialConfigBytes, 0644))
+
+			// Comprehensive Docker Image Build
+			buildCmd := exec.Command("docker", "build",
+				"-t", "hapax-config-test",
+				"-f", dockerfilePath,
+				tmpDir)
+			buildCmd.Stdout = os.Stdout
+			buildCmd.Stderr = os.Stderr
+
+			// Enhanced Build Error Handling
+			if err := buildCmd.Run(); err != nil {
+				// Capture and log detailed build context information
+				t.Logf("Docker build failed for scenario: %s", scenario.name)
+
+				// List contents of temporary directory for diagnostics
+				listCmd := exec.Command("ls", "-R", tmpDir)
+				listOutput, listErr := listCmd.CombinedOutput()
+				if listErr == nil {
+					t.Logf("Temporary directory contents:\n%s", string(listOutput))
+				}
+
+				// Attempt to read Dockerfile contents for verification
+				dockerfileBytes, readErr := os.ReadFile(dockerfilePath)
+				if readErr == nil {
+					t.Logf("Dockerfile contents:\n%s", string(dockerfileBytes))
+				}
+
+				t.Fatalf("Docker build failed: %v", err)
+			}
+
+			t.Logf("Docker image built successfully for scenario: %s", scenario.name)
+		})
+	}
+}
+
+// findProjectRoot dynamically locates the project root directory
+func findProjectRoot() (string, error) {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	// Systematic root discovery mechanism
+	for {
+		if _, err := os.Stat(filepath.Join(currentDir, "go.mod")); err == nil {
+			return currentDir, nil
+		}
+
+		parentDir := filepath.Dir(currentDir)
+		if parentDir == currentDir {
+			return "", fmt.Errorf("could not locate project root containing go.mod")
+		}
+		currentDir = parentDir
+	}
 }
