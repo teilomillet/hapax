@@ -344,7 +344,6 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if timeoutHeader := r.Header.Get("X-Test-Timeout"); timeoutHeader != "" {
 		ctx = context.WithValue(ctx, middleware.XTestTimeoutKey, timeoutHeader)
-		r = r.WithContext(ctx)
 	}
 
 	// Process the request
