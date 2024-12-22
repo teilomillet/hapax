@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
@@ -314,4 +315,88 @@ func TestMetricsInProduction(t *testing.T) {
 	if value != 1 {
 		t.Errorf("Expected 1 health check error, got %v", value)
 	}
+}
+
+func TestMultiProviderSeamlessConnection(t *testing.T) {
+	// Create mock providers with different behaviors
+	openaiProvider := mocks.NewMockLLMWithConfig("openai", "gpt-3.5", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "OpenAI response", nil
+	})
+
+	anthropicProvider := mocks.NewMockLLMWithConfig("anthropic", "claude-3-haiku", func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "Anthropic response", nil
+	})
+
+	// Configuration with multiple providers and preferences
+	cfg := &config.Config{
+		TestMode: true,
+		Providers: map[string]config.ProviderConfig{
+			"openai": {
+				Type:  "openai",
+				Model: "gpt-3.5-turbo",
+			},
+			"anthropic": {
+				Type:  "anthropic",
+				Model: "claude-3-haiku",
+			},
+		},
+		ProviderPreference: []string{"openai", "anthropic"},
+	}
+
+	// Create logger and metrics registry
+	logger := zap.NewNop()
+	registry := prometheus.NewRegistry()
+
+	// Create provider manager
+	manager, err := provider.NewManager(cfg, logger, registry)
+	require.NoError(t, err)
+
+	// Set up providers
+	providers := map[string]gollm.LLM{
+		"openai":    openaiProvider,
+		"anthropic": anthropicProvider,
+	}
+	manager.SetProviders(providers)
+
+	// Create test prompt
+	prompt := &gollm.Prompt{
+		Messages: []gollm.PromptMessage{
+			{Role: "user", Content: "Test multi-provider connection"},
+		},
+	}
+
+	// Test primary provider (OpenAI)
+	var response string
+	err = manager.Execute(context.Background(), func(llm gollm.LLM) error {
+		resp, err := llm.Generate(context.Background(), prompt)
+		response = resp
+		return err
+	}, prompt)
+
+	// Assert first call uses OpenAI successfully
+	require.NoError(t, err)
+	assert.Equal(t, "OpenAI response", response)
+
+	// Simulate OpenAI failure
+	openaiProvider.GenerateFunc = func(ctx context.Context, p *gollm.Prompt) (string, error) {
+		return "", fmt.Errorf("OpenAI provider failed")
+	}
+
+	// Update health status to trigger failover
+	manager.UpdateHealthStatus("openai", provider.HealthStatus{
+		Healthy:    false,
+		LastCheck:  time.Now(),
+		ErrorCount: 3,
+	})
+
+	// Test failover to Anthropic
+	err = manager.Execute(context.Background(), func(llm gollm.LLM) error {
+		resp, err := llm.Generate(context.Background(), prompt)
+		response = resp
+		return err
+	}, prompt)
+
+	// Assert failover works and Anthropic is used
+	require.NoError(t, err)
+	assert.Equal(t, "Anthropic response", response)
 }
