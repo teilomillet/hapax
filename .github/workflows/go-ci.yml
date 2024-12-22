@@ -69,7 +69,8 @@ jobs:
       - name: Build
         run: |
           VERSION=$(git describe --tags --always --dirty)
-          go build -v -ldflags="-X main.Version=${VERSION}" -o hapax ./...
+          mkdir -p hapax
+          go build -v -ldflags="-X main.Version=${VERSION}" -o hapax/hapax ./...
         
       - name: Upload artifact
         uses: actions/upload-artifact@v3
@@ -126,7 +127,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           body: ${{ env.CHANGELOG }}
-          files: ./hapax
+          files: ./hapax/hapax
           draft: false
           prerelease: false
           generate_release_notes: true
