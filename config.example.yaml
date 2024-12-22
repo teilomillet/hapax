@@ -5,11 +5,19 @@ server:
   max_header_bytes: 1048576
   shutdown_timeout: 5s
 
+llm:
+  provider: anthropic
+  model: claude-3.5-haiku-latest
+  api_key: ${ANTHROPIC_API_KEY}
+  max_context_tokens: 100000
+  retry:
+    max_retries: 3
+    initial_delay: 100ms
+    max_delay: 2s
+    multiplier: 2.0
+    retryable_errors: ["rate_limit", "timeout", "server_error"]
+
 providers:
-  openai:
-    type: openai
-    model: gpt-4o-mini
-    api_key: ${OPENAI_API_KEY}
   anthropic:
     type: anthropic
     model: claude-3.5-haiku-latest
@@ -19,9 +27,7 @@ providers:
     model: llama3
     api_key: ""
 
-# Order of provider preference for failover
 provider_preference:
-  - openai
   - anthropic
   - ollama
 
@@ -33,3 +39,22 @@ metrics:
   enabled: true
   prometheus:
     enabled: true
+
+routes:
+  - path: /v1/completions
+    handler: completion
+    version: v1
+    methods: [POST]
+  - path: /health
+    handler: health
+    version: v1
+    methods: [GET]
+
+processing:
+  request_templates:
+    default: "{{.Input}}"
+    chat: "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}"
+  response_formatting:
+    clean_json: true
+    trim_whitespace: true
+    max_length: 1048576

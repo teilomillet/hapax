@@ -31,11 +31,12 @@ RUN apk add --no-cache ca-certificates tzdata curl
 # Set working directory
 WORKDIR /app
 
-# Copy binary from builder
+# Copy binary and configuration files
 COPY --from=builder /app/hapax .
 
-# Copy default config file
 COPY config.example.yaml ./config.yaml
+COPY docker-compose.yml ./docker-compose.yml
+COPY prometheus.yml ./prometheus.yml
 
 # Use non-root user
 USER hapax
@@ -43,10 +44,11 @@ USER hapax
 # Expose ports
 EXPOSE 8080
 
-# Set healthcheck that waits for initial startup
+# Set healthcheck
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the application
 ENTRYPOINT ["./hapax"]
+
 CMD ["--config", "config.yaml"]

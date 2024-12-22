@@ -73,18 +73,21 @@ routes:
 ## Getting Started
 
 ```bash
-# Pull Hapax
-docker pull ghcr.io/teilomillet/hapax:latest
+# Pull and start Hapax with default configuration
+docker run -p 8080:8080 -e ANTHROPIC_API_KEY=your_api_key teilomillet/hapax:latest
 
-# Generate default configuration
-docker run --rm -v $(pwd):/output \
-  ghcr.io/teilomillet/hapax:latest \
-  cp /app/config.example.yaml /output/config.yaml
+# Or, to use a custom configuration with environment variables:
+# 1. Extract the default configuration
+docker run --rm teilomillet/hapax:latest cat /app/config.yaml > config.yaml
 
-# Launch Hapax
+# 2. Create a .env file to store your environment variables
+echo "ANTHROPIC_API_KEY=your_api_key" > .env
+
+# 3. Start Hapax with your configuration and environment variables
 docker run -p 8080:8080 \
   -v $(pwd)/config.yaml:/app/config.yaml \
-  ghcr.io/teilomillet/hapax:latest
+  --env-file .env \
+  teilomillet/hapax:latest
 ```
 
 ## What's Next

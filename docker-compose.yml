@@ -1,6 +1,7 @@
 services:
   hapax:
     build: .
+    container_name: hapax
     ports:
       - "8080:8080"
     volumes:
