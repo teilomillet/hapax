@@ -11,7 +11,7 @@ The simplest type of request. Just provide an input text and get a completion.
 curl -X POST http://localhost:8081/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "What is the capital of France?"
+    "prompt": "What is the capital of France?"
   }'
 ```
 
