@@ -246,53 +246,125 @@ type CircuitBreakerConfig struct {
 	TestMode bool `yaml:"test_mode"`
 }
 
-// DefaultConfig returns a configuration with sensible defaults
+// DefaultConfig returns a configuration that aligns with the existing validation
+// requirements while keeping the implementation simple and focused on memory caching.
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Port:            8080,
-			ReadTimeout:     30 * time.Second,
-			WriteTimeout:    30 * time.Second,
-			MaxHeaderBytes:  1 << 20, // 1MB
+			ReadTimeout:     45 * time.Second,
+			WriteTimeout:    45 * time.Second,
+			MaxHeaderBytes:  2 << 20, // 2MB for larger headers
 			ShutdownTimeout: 30 * time.Second,
 		},
+
 		LLM: LLMConfig{
-			Provider: "ollama",
-			Model:    "llama2",
+			Provider:         "ollama",
+			Model:            "llama2",
+			MaxContextTokens: 16384,
+			SystemPrompt:     "You are a helpful AI assistant focused on providing accurate and detailed responses.",
+
+			// Backup providers configuration
+			BackupProviders: []BackupProvider{
+				{
+					Provider: "anthropic",
+					Model:    "claude-3-haiku",
+					APIKey:   "${ANTHROPIC_API_KEY}",
+				},
+				{
+					Provider: "openai",
+					Model:    "gpt-3.5-turbo",
+					APIKey:   "${OPENAI_API_KEY}",
+				},
+			},
+
+			// Health check configuration
 			HealthCheck: &ProviderHealthCheck{
 				Enabled:          true,
-				Interval:         30 * time.Second,
+				Interval:         15 * time.Second,
 				Timeout:          5 * time.Second,
-				FailureThreshold: 3,
+				FailureThreshold: 2,
 			},
-			Cache: &CacheConfig{
-				Enable:  false,
-				Type:    "memory",
-				TTL:     24 * time.Hour,
-				MaxSize: 1 << 30, // 1GB
-			},
+
+			// Retry configuration aligned with validation requirements
 			Retry: &RetryConfig{
-				MaxRetries:      3,
-				InitialDelay:    100 * time.Millisecond,
-				MaxDelay:        2 * time.Second,
-				Multiplier:      2.0,
-				RetryableErrors: []string{"rate_limit", "timeout", "server_error"},
+				MaxRetries:   5,
+				InitialDelay: 100 * time.Millisecond,
+				MaxDelay:     5 * time.Second,
+				Multiplier:   1.5,
+				RetryableErrors: []string{
+					"rate_limit",
+					"timeout",
+					"server_error",
+				},
+			},
+
+			// Default options aligned with validation requirements
+			Options: map[string]interface{}{
+				"temperature":       0.7, // Must be between 0 and 1
+				"top_p":             0.9, // Must be between 0 and 1
+				"frequency_penalty": 0.3, // Must be between -2 and 2
+				"presence_penalty":  0.3, // Must be between -2 and 2
+				"stream":            true,
 			},
 		},
+
+		// Circuit breaker configuration
+		CircuitBreaker: CircuitBreakerConfig{
+			MaxRequests:      100,
+			Interval:         30 * time.Second,
+			Timeout:          10 * time.Second,
+			FailureThreshold: 5,
+			TestMode:         false,
+		},
+
+		// Provider preference order
+		ProviderPreference: []string{
+			"ollama",
+			"anthropic",
+			"openai",
+		},
+
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
 		},
+
 		Routes: []RouteConfig{
 			{
 				Path:    "/v1/completions",
 				Handler: "completion",
 				Version: "v1",
+				Methods: []string{"POST", "OPTIONS"},
+				Middleware: []string{
+					"auth",
+					"rate-limit",
+					"cors",
+					"logging",
+				},
+				HealthCheck: &HealthCheck{
+					Enabled:   true,
+					Interval:  30 * time.Second,
+					Timeout:   5 * time.Second,
+					Threshold: 3,
+					Checks: map[string]string{
+						"api":     "http",
+						"latency": "threshold",
+					},
+				},
 			},
 			{
 				Path:    "/health",
 				Handler: "health",
 				Version: "v1",
+				Methods: []string{"GET"},
+			},
+			{
+				Path:       "/metrics",
+				Handler:    "metrics",
+				Version:    "v1",
+				Methods:    []string{"GET"},
+				Middleware: []string{"auth"},
 			},
 		},
 	}
