@@ -142,18 +142,6 @@ func (p *Processor) ProcessRequest(ctx context.Context, req *Request) (*Response
 	return p.formatResponse(response), nil
 }
 
-// Helper function to convert our Message type to gollm.PromptMessage
-func convertMessages(messages []Message) []gollm.PromptMessage {
-	promptMessages := make([]gollm.PromptMessage, len(messages))
-	for i, msg := range messages {
-		promptMessages[i] = gollm.PromptMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		}
-	}
-	return promptMessages
-}
-
 // formatResponse applies configured formatting options to the LLM response:
 // 1. Cleans JSON if enabled (removes markdown blocks, formats JSON)
 // 2. Trims whitespace if enabled
