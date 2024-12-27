@@ -153,7 +153,8 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// Check default routes
-	if len(config.Routes) != 2 {
-		t.Errorf("unexpected number of default routes: got %d, want %d", len(config.Routes), 2)
+	if len(config.Routes) != 3 {
+		t.Errorf("unexpected number of default routes: got %d, want %d",
+			len(config.Routes), 3)
 	}
 }

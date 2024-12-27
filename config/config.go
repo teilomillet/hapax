@@ -252,7 +252,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
 			Port:            8080,
-			ReadTimeout:     45 * time.Second,
+			ReadTimeout:     30 * time.Second,
 			WriteTimeout:    45 * time.Second,
 			MaxHeaderBytes:  2 << 20, // 2MB for larger headers
 			ShutdownTimeout: 30 * time.Second,
