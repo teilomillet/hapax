@@ -10,7 +10,6 @@ import (
 
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
-	"github.com/teilomillet/hapax/server/middleware"
 )
 
 // Processor handles request processing and response formatting for LLM interactions.
@@ -91,49 +90,68 @@ func (p *Processor) ProcessRequest(ctx context.Context, req *Request) (*Response
 		return nil, fmt.Errorf("request cannot be nil")
 	}
 
-	// Select the appropriate template, falling back to default
-	tmpl := p.templates["default"]
-	if t, ok := p.templates[req.Type]; ok {
-		tmpl = t
-	}
-	if tmpl == nil {
-		return nil, fmt.Errorf("no template found for type: %s", req.Type)
+	var promptMessages []gollm.PromptMessage
+
+	// Always start with system prompt if we have one
+	if p.defaultPrompt != "" {
+		promptMessages = append(promptMessages, gollm.PromptMessage{
+			Role:    "system",
+			Content: p.defaultPrompt,
+		})
 	}
 
-	// Execute the template with the request data
-	var buf bytes.Buffer
-	err := tmpl.Execute(&buf, req)
-	if err != nil {
-		return nil, fmt.Errorf("template execution failed: %w", err)
+	// Now we have two clear paths - either conversation or single input
+	if len(req.Messages) > 0 {
+		// For conversations, we just need to convert the messages directly
+		for _, msg := range req.Messages {
+			promptMessages = append(promptMessages, gollm.PromptMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+	} else if req.Input != "" {
+		// For single inputs, we still use the template system
+		tmpl := p.templates["default"]
+		if t, ok := p.templates[req.Type]; ok {
+			tmpl = t
+		}
+		if tmpl == nil {
+			return nil, fmt.Errorf("no template found for type: %s", req.Type)
+		}
+
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, req); err != nil {
+			return nil, fmt.Errorf("template execution failed: %w", err)
+		}
+
+		promptMessages = append(promptMessages, gollm.PromptMessage{
+			Role:    "user",
+			Content: buf.String(),
+		})
+	} else {
+		return nil, fmt.Errorf("request must contain either messages or input")
 	}
 
-	// Create an LLM prompt with system context
-	prompt := &gollm.Prompt{
-		Messages: []gollm.PromptMessage{
-			{
-				Role:    "system",
-				Content: p.defaultPrompt,
-			},
-			{
-				Role:    "user",
-				Content: buf.String(),
-			},
-		},
-	}
+	prompt := &gollm.Prompt{Messages: promptMessages}
 
-	// Pass timeout header to LLM context if present
-	if timeoutHeader := ctx.Value("X-Test-Timeout"); timeoutHeader != nil {
-		ctx = context.WithValue(ctx, middleware.XTestTimeoutKey, timeoutHeader)
-	}
-
-	// Send request to LLM
 	response, err := p.llm.Generate(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("LLM processing failed: %w", err)
 	}
 
-	// Apply response formatting
 	return p.formatResponse(response), nil
+}
+
+// Helper function to convert our Message type to gollm.PromptMessage
+func convertMessages(messages []Message) []gollm.PromptMessage {
+	promptMessages := make([]gollm.PromptMessage, len(messages))
+	for i, msg := range messages {
+		promptMessages[i] = gollm.PromptMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		}
+	}
+	return promptMessages
 }
 
 // formatResponse applies configured formatting options to the LLM response:
