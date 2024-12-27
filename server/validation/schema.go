@@ -2,7 +2,6 @@ package validation
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/pkoukk/tiktoken-go"
 )
@@ -22,55 +21,6 @@ type tiktokenWrapper struct {
 func (t *tiktokenWrapper) CountTokens(text string) int {
 	tokens := t.Encode(text, nil, nil)
 	return len(tokens)
-}
-
-// CompletionRequest represents the expected schema for completion requests
-type CompletionRequest struct {
-	Messages []Message `json:"messages" validate:"required,dive"`
-	Options  *Options  `json:"options,omitempty" validate:"omitempty"`
-}
-
-// Message represents a single message in a completion request
-type Message struct {
-	Role    string `json:"role" validate:"required,oneof=user assistant system"`
-	Content string `json:"content" validate:"required"`
-}
-
-// Options represents optional parameters for completion requests
-type Options struct {
-	Temperature      float64 `json:"temperature,omitempty" validate:"omitempty,gte=0,lte=1"`
-	MaxTokens       int     `json:"max_tokens,omitempty" validate:"omitempty,gt=0"`
-	TopP            float64 `json:"top_p,omitempty" validate:"omitempty,gt=0,lte=1"`
-	FrequencyPenalty float64 `json:"frequency_penalty,omitempty" validate:"omitempty,gte=-2,lte=2"`
-	PresencePenalty  float64 `json:"presence_penalty,omitempty" validate:"omitempty,gte=-2,lte=2"`
-	Cache           *CacheOptions `json:"cache,omitempty" validate:"omitempty"`
-	Retry           *RetryOptions `json:"retry,omitempty" validate:"omitempty"`
-}
-
-// CacheOptions represents caching configuration for requests
-type CacheOptions struct {
-	Enable   bool          `json:"enable"`
-	Type     string        `json:"type" validate:"omitempty,oneof=memory redis file"`
-	TTL      time.Duration `json:"ttl" validate:"omitempty,gt=0"`
-	MaxSize  int64         `json:"max_size" validate:"omitempty,gt=0"`
-	Dir      string        `json:"dir" validate:"omitempty,required_if=Type file,dir"`
-	Redis    *RedisOptions `json:"redis" validate:"omitempty,required_if=Type redis"`
-}
-
-// RedisOptions represents Redis-specific configuration
-type RedisOptions struct {
-	Address  string `json:"address" validate:"required,hostname_port"`
-	Password string `json:"password" validate:"omitempty"`
-	DB       int    `json:"db" validate:"gte=0"`
-}
-
-// RetryOptions represents retry configuration for failed requests
-type RetryOptions struct {
-	MaxRetries      int           `json:"max_retries" validate:"gt=0"`
-	InitialDelay    time.Duration `json:"initial_delay" validate:"required,gt=0"`
-	MaxDelay        time.Duration `json:"max_delay" validate:"required,gtfield=InitialDelay"`
-	Multiplier      float64       `json:"multiplier" validate:"gt=1"`
-	RetryableErrors []string      `json:"retryable_errors" validate:"required,min=1,dive,oneof=rate_limit timeout server_error"`
 }
 
 // TokenCounter handles token counting for messages using tiktoken
@@ -103,10 +53,6 @@ func (tc *TokenCounter) CountRequestTokens(req CompletionRequest) int {
 
 // ValidateTokens checks if the request's token count is within limits
 func (tc *TokenCounter) ValidateTokens(req CompletionRequest, maxContextTokens int) error {
-	if maxContextTokens <= 0 {
-		return fmt.Errorf("invalid max_context_tokens: must be greater than 0")
-	}
-
 	totalTokens := tc.CountRequestTokens(req)
 	if req.Options != nil && req.Options.MaxTokens > 0 {
 		totalTokens += req.Options.MaxTokens
@@ -216,8 +162,8 @@ func validateRetryOptions(retry *RetryOptions) error {
 	}
 
 	validErrors := map[string]bool{
-		"rate_limit":    true,
-		"timeout":       true,
+		"rate_limit":   true,
+		"timeout":      true,
 		"server_error": true,
 	}
 
