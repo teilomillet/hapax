@@ -175,6 +175,14 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Add debug logging
+	logger.Debug("Received completion request",
+		zap.String("request_type", requestType),
+		zap.Int("messages_count", len(completionReq.Messages)),
+		zap.Any("messages", completionReq.Messages),
+		zap.String("input", completionReq.Input),
+	)
+
 	// Convert request to messages format
 	var messages []gollm.PromptMessage
 
