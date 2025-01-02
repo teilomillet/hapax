@@ -161,7 +161,6 @@ func ValidateCompletion(next http.Handler) http.Handler {
 		// Request parsing with detailed error handling
 		var req CompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fmt.Printf("DEBUG: Request parsing error: %v\n", err)
 			sendError(
 				"Invalid request format",
 				[]ValidationErrorDetail{{
@@ -174,17 +173,8 @@ func ValidateCompletion(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add debug logging
-		fmt.Printf("DEBUG: Request validation starting\n")
-		fmt.Printf("DEBUG: Raw request: %+v\n", req)
-		fmt.Printf("DEBUG: Messages count: %d\n", len(req.Messages))
-		for i, msg := range req.Messages {
-			fmt.Printf("DEBUG: Message[%d] - Role: '%s', Content: '%s'\n", i, msg.Role, msg.Content)
-		}
-
 		// Structured validation with detailed error collection
 		if err := validate.Struct(req); err != nil {
-			fmt.Printf("DEBUG: Validation Error: %v\n", err)
 			var details []ValidationErrorDetail
 			for _, err := range err.(validator.ValidationErrors) {
 				var errorMessage string
@@ -217,10 +207,6 @@ func ValidateCompletion(next http.Handler) http.Handler {
 					Value:   fmt.Sprintf("%v", err.Value()),
 				}
 				details = append(details, detail)
-
-				// EXTREME LOGGING
-				fmt.Printf("FORCED ERROR - Field: '%s', Message: '%s', Code: '%s'\n",
-					detail.Field, detail.Message, detail.Code)
 			}
 
 			sendError(
