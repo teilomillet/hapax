@@ -15,72 +15,11 @@ import (
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/handlers"
 	"github.com/teilomillet/hapax/server/middleware"
+	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap"
 )
-
-// CompletionRequest represents an incoming completion request from clients.
-// The prompt field contains the text to send to the LLM for completion.
-type CompletionRequest struct {
-	Prompt string `json:"prompt"`
-}
-
-// CompletionResponse represents the response sent back to clients.
-// The completion field contains the generated text from the LLM.
-type CompletionResponse struct {
-	Completion string `json:"completion"`
-}
-
-// CompletionHandler processes LLM completion requests.
-// It maintains a reference to the LLM client to generate responses.
-type CompletionHandler struct {
-	llm gollm.LLM
-}
-
-// NewCompletionHandler creates a new completion handler with the specified LLM client.
-func NewCompletionHandler(llm gollm.LLM) *CompletionHandler {
-	return &CompletionHandler{llm: llm}
-}
-
-// ServeHTTP implements the http.Handler interface for completion requests.
-// It:
-// 1. Validates the request method and body
-// 2. Extracts the prompt from the request
-// 3. Sends the prompt to the LLM for completion
-// 4. Returns the generated completion to the client
-func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		errors.ErrorWithType(w, "Method not allowed", errors.ValidationError, http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req CompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errors.ErrorWithType(w, "Invalid request body", errors.ValidationError, http.StatusBadRequest)
-		return
-	}
-
-	if req.Prompt == "" {
-		errors.ErrorWithType(w, "prompt is required", errors.ValidationError, http.StatusBadRequest)
-		return
-	}
-
-	prompt := gollm.NewPrompt(req.Prompt)
-	resp, err := h.llm.Generate(r.Context(), prompt)
-	if err != nil {
-		errors.ErrorWithType(w, "Failed to generate completion", errors.ProviderError, http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(CompletionResponse{
-		Completion: resp,
-	}); err != nil {
-		// Use the existing error handling mechanism
-		errors.ErrorWithType(w, "Failed to encode response", errors.ProviderError, http.StatusInternalServerError)
-		return
-	}
-}
 
 // Router handles HTTP routing and middleware configuration.
 // It sets up all endpoints and applies common middleware to requests.
@@ -95,7 +34,7 @@ type Router struct {
 // 2. Configures the completion endpoint for LLM requests
 // 3. Adds health check endpoint for container orchestration
 // 4. Adds metrics endpoint for Prometheus monitoring
-func NewRouter(completion http.Handler) *Router {
+func NewRouter(llm gollm.LLM, logger *zap.Logger) *Router {
 	r := chi.NewRouter()
 
 	// Add middleware stack for all requests
@@ -104,14 +43,31 @@ func NewRouter(completion http.Handler) *Router {
 	r.Use(middleware.PanicRecovery) // Recovers from panics gracefully
 	r.Use(middleware.CORS)          // Enables cross-origin requests
 
+	// Create processor for the completion handler
+	cfg := &config.ProcessingConfig{
+		RequestTemplates: map[string]string{
+			"default":  "{{.Input}}",
+			"chat":     "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}",
+			"function": "Function: {{.FunctionDescription}}\nInput: {{.Input}}",
+		},
+	}
+
+	processor, err := processing.NewProcessor(cfg, llm)
+	if err != nil {
+		logger.Fatal("Failed to create processor", zap.Error(err))
+	}
+
+	// Create new completion handler using the handlers package
+	completionHandler := handlers.NewCompletionHandler(processor, logger)
+
 	router := &Router{
 		router:     r,
-		completion: completion,
+		completion: completionHandler,
 	}
 
 	// Mount routes
 	// Completion endpoint for LLM requests
-	r.Post("/v1/completions", completion.ServeHTTP)
+	r.Post("/v1/completions", completionHandler.ServeHTTP)
 
 	// Health check endpoint for container orchestration
 	// Returns 200 OK with {"status": "ok"} when the service is healthy
@@ -246,13 +202,12 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 	defer s.mu.Unlock()
 
 	// Create new handler and router
-	handler := NewCompletionHandler(s.llm)
-	router := NewRouter(handler)
+	handler := NewRouter(s.llm, s.logger)
 
 	// Create new HTTP server with updated config
 	newServer := &http.Server{
 		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:        router,
+		Handler:        handler,
 		ReadTimeout:    cfg.Server.ReadTimeout,
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,

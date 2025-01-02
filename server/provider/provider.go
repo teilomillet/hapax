@@ -116,7 +116,7 @@ func (m *Manager) initializeProviders() error {
 }
 
 // initializeProvider initializes a single LLM provider
-func (m *Manager) initializeProvider(name string, cfg config.ProviderConfig) (gollm.LLM, error) {
+func (m *Manager) initializeProvider(_ string, cfg config.ProviderConfig) (gollm.LLM, error) {
 	provider, err := gollm.NewLLM(
 		gollm.SetProvider(cfg.Type),
 		gollm.SetModel(cfg.Model),

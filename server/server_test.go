@@ -15,11 +15,16 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
+	"github.com/teilomillet/hapax/server/handlers"
+	"github.com/teilomillet/hapax/server/middleware"
 	"github.com/teilomillet/hapax/server/mocks"
+	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 )
 
 // MockConfigWatcher implements a test version of the configuration watcher
@@ -49,6 +54,8 @@ func (m *MockConfigWatcher) Close() error {
 // It includes tests for invalid methods, invalid JSON input, missing prompts, LLM errors, and successful completions.
 // Each test checks the response status and body to ensure the handler behaves as expected.
 func TestCompletionHandler(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
 	tests := []struct {
 		name           string
 		method         string
@@ -71,7 +78,7 @@ func TestCompletionHandler(t *testing.T) {
 			method:         http.MethodPost,
 			body:           "invalid json",
 			wantStatus:     http.StatusBadRequest,
-			wantErrContain: "Invalid request body",
+			wantErrContain: "Invalid completion request format",
 			expectJSON:     true,
 		},
 		{
@@ -79,29 +86,29 @@ func TestCompletionHandler(t *testing.T) {
 			method:         http.MethodPost,
 			body:           map[string]string{},
 			wantStatus:     http.StatusBadRequest,
-			wantErrContain: "prompt is required",
+			wantErrContain: "Either input or messages must be provided",
 			expectJSON:     true,
 		},
 		{
 			name:   "llm error",
 			method: http.MethodPost,
-			body:   map[string]string{"prompt": "Hello"},
+			body:   map[string]string{"input": "Hello"},
 			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
 				return "", stderrors.New("llm error")
 			},
 			wantStatus:     http.StatusInternalServerError,
-			wantErrContain: "Failed to generate completion",
+			wantErrContain: "Failed to process request",
 			expectJSON:     true,
 		},
 		{
 			name:   "success",
 			method: http.MethodPost,
-			body:   map[string]string{"prompt": "Hello"},
+			body:   map[string]string{"input": "Hello"},
 			generateFunc: func(ctx context.Context, p *gollm.Prompt) (string, error) {
 				return "Hello, world!", nil
 			},
 			wantStatus:   http.StatusOK,
-			wantResponse: `{"completion":"Hello, world!"}` + "\n",
+			wantResponse: `{"content":"Hello, world!"}` + "\n",
 			expectJSON:   true,
 		},
 	}
@@ -109,8 +116,22 @@ func TestCompletionHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create mock LLM
-			llm := &MockLLM{GenerateFunc: tt.generateFunc}
-			handler := NewCompletionHandler(llm)
+			mockLLM := mocks.NewMockLLM(tt.generateFunc)
+
+			// Configure processor with templates
+			cfg := &config.ProcessingConfig{
+				RequestTemplates: map[string]string{
+					"default":  "{{.Input}}",
+					"chat":     "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}",
+					"function": "Function: {{.FunctionDescription}}\nInput: {{.Input}}",
+				},
+			}
+
+			processor, err := processing.NewProcessor(cfg, mockLLM)
+			require.NoError(t, err)
+
+			// Create handler using the handlers package
+			handler := handlers.NewCompletionHandler(processor, logger)
 
 			// Create request
 			var body io.Reader
@@ -123,6 +144,10 @@ func TestCompletionHandler(t *testing.T) {
 				}
 			}
 			req := httptest.NewRequest(tt.method, "/v1/completions", body)
+			req = req.WithContext(context.WithValue(req.Context(), middleware.RequestIDKey, "test-123"))
+			if tt.method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/json")
+			}
 			w := httptest.NewRecorder()
 
 			// Handle request
@@ -141,9 +166,15 @@ func TestCompletionHandler(t *testing.T) {
 			}
 
 			// Check error message
-			if tt.wantErrContain != "" && !strings.Contains(w.Body.String(), tt.wantErrContain) {
-				t.Errorf("handler returned unexpected error: got %v want %v",
-					w.Body.String(), tt.wantErrContain)
+			if tt.wantErrContain != "" {
+				var errorResp errors.ErrorResponse
+				if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
+					t.Fatalf("Failed to decode error response: %v", err)
+				}
+				if !strings.Contains(errorResp.Message, tt.wantErrContain) {
+					t.Errorf("handler returned unexpected error: got %v want %v",
+						errorResp.Message, tt.wantErrContain)
+				}
 			}
 
 			if tt.expectJSON {
@@ -151,17 +182,6 @@ func TestCompletionHandler(t *testing.T) {
 				if contentType != "application/json" {
 					t.Errorf("handler returned wrong content type: got %v want application/json",
 						contentType)
-				}
-
-				if tt.wantErrContain != "" {
-					var errorResp errors.HapaxError
-					if err := json.NewDecoder(w.Body).Decode(&errorResp); err != nil {
-						t.Fatalf("Failed to decode error response: %v", err)
-					}
-					if errorResp.Message != tt.wantErrContain {
-						t.Errorf("handler returned unexpected error: got %v want %v",
-							errorResp.Message, tt.wantErrContain)
-					}
 				}
 			}
 		})
@@ -172,9 +192,9 @@ func TestCompletionHandler(t *testing.T) {
 // It verifies the behavior of the completion endpoint, health check, and handling of invalid routes.
 // Each test checks the response status to ensure the router is correctly configured.
 func TestRouter(t *testing.T) {
-	llm := &MockLLM{}
-	completionHandler := NewCompletionHandler(llm)
-	router := NewRouter(completionHandler)
+	logger := zaptest.NewLogger(t)
+	mockLLM := mocks.NewMockLLM(nil)
+	router := NewRouter(mockLLM, logger)
 
 	tests := []struct {
 		name       string
@@ -215,16 +235,12 @@ func TestRouter(t *testing.T) {
 
 // TestRouterWithMiddleware tests the router with middleware
 func TestRouterWithMiddleware(t *testing.T) {
-	// Create a mock completion handler
-	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := w.Write([]byte(`{"completion":"test response"}`)); err != nil {
-			// Handle the error, e.g., log it or fail the test
-			t.Errorf("Failed to write response: %v", err)
-		}
+	logger := zaptest.NewLogger(t)
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "test response", nil
 	})
 
-	router := NewRouter(mockHandler)
+	router := NewRouter(mockLLM, logger)
 
 	tests := []struct {
 		name           string
@@ -258,7 +274,16 @@ func TestRouterWithMiddleware(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			var body io.Reader
+			if tt.method == "POST" {
+				bodyBytes, _ := json.Marshal(map[string]string{"input": "test"})
+				body = bytes.NewBuffer(bodyBytes)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, body)
+			if tt.method == "POST" {
+				req.Header.Set("Content-Type", "application/json")
+			}
 			rec := httptest.NewRecorder()
 
 			router.ServeHTTP(rec, req)
