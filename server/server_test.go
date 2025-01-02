@@ -194,7 +194,8 @@ func TestCompletionHandler(t *testing.T) {
 func TestRouter(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockLLM := mocks.NewMockLLM(nil)
-	router := NewRouter(mockLLM, logger)
+	cfg := config.DefaultConfig()
+	router := NewRouter(mockLLM, cfg, logger)
 
 	tests := []struct {
 		name       string
@@ -239,8 +240,8 @@ func TestRouterWithMiddleware(t *testing.T) {
 	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
 		return "test response", nil
 	})
-
-	router := NewRouter(mockLLM, logger)
+	cfg := config.DefaultConfig()
+	router := NewRouter(mockLLM, cfg, logger)
 
 	tests := []struct {
 		name           string

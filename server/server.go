@@ -16,6 +16,7 @@ import (
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
 	"github.com/teilomillet/hapax/server/handlers"
+	"github.com/teilomillet/hapax/server/metrics"
 	"github.com/teilomillet/hapax/server/middleware"
 	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap"
@@ -24,8 +25,9 @@ import (
 // Router handles HTTP routing and middleware configuration.
 // It sets up all endpoints and applies common middleware to requests.
 type Router struct {
-	router     chi.Router   // Chi router for flexible routing
-	completion http.Handler // Handler for completion requests
+	router     chi.Router       // Chi router for flexible routing
+	completion http.Handler     // Handler for completion requests
+	metrics    *metrics.Metrics // Server metrics
 }
 
 // NewRouter creates a new router with all endpoints configured.
@@ -34,17 +36,32 @@ type Router struct {
 // 2. Configures the completion endpoint for LLM requests
 // 3. Adds health check endpoint for container orchestration
 // 4. Adds metrics endpoint for Prometheus monitoring
-func NewRouter(llm gollm.LLM, logger *zap.Logger) *Router {
+func NewRouter(llm gollm.LLM, cfg *config.Config, logger *zap.Logger) *Router {
 	r := chi.NewRouter()
 
+	// Initialize metrics
+	m := metrics.NewMetrics()
+
 	// Add middleware stack for all requests
-	r.Use(middleware.RequestID)     // Adds unique ID to each request
+	r.Use(middleware.RequestID) // Adds unique ID to each request
+
+	// Configure queue middleware if enabled
+	if cfg.Queue.Enabled {
+		qm := middleware.NewQueueMiddleware(middleware.QueueConfig{
+			InitialSize:  cfg.Queue.InitialSize,
+			Metrics:      m,
+			StatePath:    cfg.Queue.StatePath,
+			SaveInterval: cfg.Queue.SaveInterval,
+		})
+		r.Use(qm.Handler)
+	}
+
 	r.Use(middleware.RequestTimer)  // Tracks request duration
 	r.Use(middleware.PanicRecovery) // Recovers from panics gracefully
 	r.Use(middleware.CORS)          // Enables cross-origin requests
 
 	// Create processor for the completion handler
-	cfg := &config.ProcessingConfig{
+	processingCfg := &config.ProcessingConfig{
 		RequestTemplates: map[string]string{
 			"default":  "{{.Input}}",
 			"chat":     "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}",
@@ -52,7 +69,7 @@ func NewRouter(llm gollm.LLM, logger *zap.Logger) *Router {
 		},
 	}
 
-	processor, err := processing.NewProcessor(cfg, llm)
+	processor, err := processing.NewProcessor(processingCfg, llm)
 	if err != nil {
 		logger.Fatal("Failed to create processor", zap.Error(err))
 	}
@@ -63,6 +80,7 @@ func NewRouter(llm gollm.LLM, logger *zap.Logger) *Router {
 	router := &Router{
 		router:     r,
 		completion: completionHandler,
+		metrics:    m,
 	}
 
 	// Mount routes
@@ -86,37 +104,7 @@ func NewRouter(llm gollm.LLM, logger *zap.Logger) *Router {
 	// - Request counts by status code
 	// - Request duration histogram
 	// - LLM request counts by provider/model
-	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-
-		// Check the error return from Write
-		if _, err := w.Write([]byte(`
-# HELP hapax_requests_total The total number of HTTP requests.
-# TYPE hapax_requests_total counter
-hapax_requests_total{code="200"} 10
-hapax_requests_total{code="404"} 2
-
-# HELP hapax_request_duration_seconds Time spent serving HTTP requests.
-# TYPE hapax_request_duration_seconds histogram
-hapax_request_duration_seconds_bucket{le="0.1"} 8
-hapax_request_duration_seconds_bucket{le="0.5"} 9
-hapax_request_duration_seconds_bucket{le="1"} 10
-hapax_request_duration_seconds_bucket{le="+Inf"} 10
-hapax_request_duration_seconds_sum 2.7
-hapax_request_duration_seconds_count 10
-
-# HELP hapax_llm_requests_total The total number of LLM requests.
-# TYPE hapax_llm_requests_total counter
-hapax_llm_requests_total{provider="openai",model="gpt-3.5-turbo"} 5
-`)); err != nil {
-			// In a real-world scenario, log the error
-			fmt.Printf("Failed to write metrics response: %v", err)
-
-			// Send an error response
-			http.Error(w, "Failed to generate metrics", http.StatusInternalServerError)
-			return
-		}
-	})
+	r.Handle("/metrics", m.Handler())
 
 	return router
 }
@@ -202,7 +190,7 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 	defer s.mu.Unlock()
 
 	// Create new handler and router
-	handler := NewRouter(s.llm, s.logger)
+	handler := NewRouter(s.llm, cfg, s.logger)
 
 	// Create new HTTP server with updated config
 	newServer := &http.Server{

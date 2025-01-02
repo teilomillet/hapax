@@ -25,6 +25,7 @@ type Config struct {
 	Providers          map[string]ProviderConfig `yaml:"providers"`
 	ProviderPreference []string                  `yaml:"provider_preference"` // Order of provider preference
 	CircuitBreaker     CircuitBreakerConfig      `yaml:"circuit_breaker"`
+	Queue              QueueConfig               `yaml:"queue"`
 	TestMode           bool                      `yaml:"-"` // Skip provider initialization in tests
 }
 
@@ -246,6 +247,24 @@ type CircuitBreakerConfig struct {
 	TestMode bool `yaml:"test_mode"`
 }
 
+// QueueConfig defines the configuration for the request queue middleware.
+// It controls queue size, persistence, and state management.
+type QueueConfig struct {
+	// Enabled determines if the queue middleware is active
+	Enabled bool `yaml:"enabled"`
+
+	// InitialSize is the starting maximum size of the queue
+	InitialSize int64 `yaml:"initial_size"`
+
+	// StatePath is the file path where queue state is persisted
+	// If empty, persistence is disabled
+	StatePath string `yaml:"state_path"`
+
+	// SaveInterval is how often the queue state is saved
+	// If 0, periodic saving is disabled
+	SaveInterval time.Duration `yaml:"save_interval"`
+}
+
 // DefaultConfig returns a configuration that aligns with the existing validation
 // requirements while keeping the implementation simple and focused on memory caching.
 func DefaultConfig() *Config {
@@ -366,6 +385,13 @@ func DefaultConfig() *Config {
 				Methods:    []string{"GET"},
 				Middleware: []string{"auth"},
 			},
+		},
+
+		Queue: QueueConfig{
+			Enabled:      false,            // Disabled by default
+			InitialSize:  1000,             // Default queue size
+			StatePath:    "",               // No persistence by default
+			SaveInterval: 30 * time.Second, // Save every 30s when enabled
 		},
 	}
 }
