@@ -7,16 +7,7 @@ Build a production-grade LLM gateway that makes deploying and managing LLM infra
 Focus: Enhance reliability, scalability, and deployability for production environments.
 
 ### Performance & Operations
-- [ ] Request queueing
-  - Queue size configuration with dynamic adjustment
-  - Priority queuing based on client tiers
-  - Queue metrics with Prometheus integration
-  - Backpressure handling with client feedback
-  - Queue persistence across restarts
-  - Queue cleanup and maintenance
-  - Timeout handling for queued requests
-  - Maximum queue time configuration
-
+- [x] Request queueing
 - [ ] QUIC Implementation
   - Integration with quic-go library
   - HTTP/3 support for improved latency

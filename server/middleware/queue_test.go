@@ -230,7 +230,7 @@ func TestQueueMiddleware(t *testing.T) {
 		var mu sync.Mutex
 
 		handler := qm.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pos := r.Context().Value("queue_position").(int)
+			pos := r.Context().Value(queuePositionKey).(int)
 			mu.Lock()
 			positions = append(positions, pos)
 			mu.Unlock()
