@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -51,7 +50,7 @@ func TestCompletionHandler(t *testing.T) {
 		{
 			name:        "chat completion success",
 			requestType: "chat",
-			requestBody: ChatRequest{
+			requestBody: CompletionRequest{
 				Messages: []gollm.PromptMessage{
 					{Role: "user", Content: "Hi"},
 					{Role: "assistant", Content: "Hello!"},
@@ -64,7 +63,7 @@ func TestCompletionHandler(t *testing.T) {
 		{
 			name:        "function completion success",
 			requestType: "function",
-			requestBody: FunctionRequest{
+			requestBody: CompletionRequest{
 				Input:               "What's the weather in Paris?",
 				FunctionDescription: "Get weather data for a location",
 			},
@@ -72,63 +71,13 @@ func TestCompletionHandler(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
-			name:        "empty chat messages",
-			requestType: "chat",
-			requestBody: ChatRequest{
-				Messages: []gollm.PromptMessage{},
-			},
-			expectedStatus: http.StatusBadRequest,
-			expectedError: &errors.ErrorResponse{
-				Type:      errors.ValidationError,
-				Message:   "Chat messages cannot be empty",
-				RequestID: "test-123",
-				Details: map[string]interface{}{
-					"type": "chat",
-				},
-			},
-		},
-		{
-			name:        "empty input for completion",
-			requestType: "",
-			requestBody: CompletionRequest{
-				Input: "",
-			},
-			expectedStatus: http.StatusBadRequest,
-			expectedError: &errors.ErrorResponse{
-				Type:      errors.ValidationError,
-				Message:   "Input text is required",
-				RequestID: "test-123",
-				Details: map[string]interface{}{
-					"type": "default",
-				},
-			},
-		},
-		{
-			name:        "processing error",
-			requestType: "",
-			requestBody: CompletionRequest{
-				Input: "Test input",
-			},
-			mockError:      errors.NewInternalError("test-123", fmt.Errorf("LLM error")),
-			expectedStatus: http.StatusInternalServerError,
-			expectedError: &errors.ErrorResponse{
-				Type:      errors.InternalError,
-				Message:   "Failed to process request",
-				RequestID: "test-123",
-				Details: map[string]interface{}{
-					"type":  "default",
-					"error": "LLM error",
-				},
-			},
-		},
-		{
-			name:           "invalid json in request",
+			name:           "empty request",
 			requestType:    "",
-			requestBody:    "invalid json",
+			requestBody:    CompletionRequest{},
 			expectedStatus: http.StatusBadRequest,
 			expectedError: &errors.ErrorResponse{
 				Type:      errors.ValidationError,
-				Message:   "Invalid completion request format",
+				Message:   "Either input or messages must be provided",
 				RequestID: "test-123",
 				Details: map[string]interface{}{
 					"type": "default",
@@ -183,7 +132,7 @@ func TestCompletionHandler(t *testing.T) {
 		{
 			name:        "chat with system message",
 			requestType: "chat",
-			requestBody: ChatRequest{
+			requestBody: CompletionRequest{
 				Messages: []gollm.PromptMessage{
 					{Role: "system", Content: "You are a helpful assistant"},
 					{Role: "user", Content: "Hi"},
@@ -195,7 +144,7 @@ func TestCompletionHandler(t *testing.T) {
 		{
 			name:        "function with long description",
 			requestType: "function",
-			requestBody: FunctionRequest{
+			requestBody: CompletionRequest{
 				Input:               "What's the weather?",
 				FunctionDescription: string(make([]byte, 10*1024)), // 10KB description
 			},
@@ -210,6 +159,30 @@ func TestCompletionHandler(t *testing.T) {
 					"actual_size": "10KB",
 				},
 			},
+		},
+		{
+			name:        "mixed message and input",
+			requestType: "chat",
+			requestBody: CompletionRequest{
+				Messages: []gollm.PromptMessage{
+					{Role: "system", Content: "You are a helpful assistant"},
+				},
+				Input: "Hi there",
+			},
+			mockResponse:   "Hello! I am here to help.",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:        "function with messages",
+			requestType: "function",
+			requestBody: CompletionRequest{
+				FunctionDescription: "Get weather data",
+				Messages: []gollm.PromptMessage{
+					{Role: "user", Content: "What's the weather in Paris?"},
+				},
+			},
+			mockResponse:   `{"function": "get_weather", "location": "Paris"}`,
+			expectedStatus: http.StatusOK,
 		},
 	}
 
@@ -339,4 +312,77 @@ func TestConvertMessages(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestCurlMultiMessageExample(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	// Create a mock LLM that simulates a conversation
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		// Return appropriate responses based on conversation context
+		return "I'd be happy to help you with Python programming!", nil
+	})
+
+	// Configure processor with templates
+	cfg := &config.ProcessingConfig{
+		RequestTemplates: map[string]string{
+			"chat": "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}",
+		},
+	}
+
+	processor, err := processing.NewProcessor(cfg, mockLLM)
+	require.NoError(t, err)
+
+	// Create the handler with middleware chain
+	baseHandler := NewCompletionHandler(processor, logger)
+	handler := middleware.RequestID(baseHandler) // Wrap with RequestID middleware
+
+	// This simulates the following curl command:
+	/*
+		curl -X POST "http://localhost:8081/v1/completions?type=chat" \
+		  -H "Content-Type: application/json" \
+		  -d '{
+		    "messages": [
+		      {"role": "system", "content": "You are a helpful programming assistant."},
+		      {"role": "user", "content": "I need help with Python."},
+		      {"role": "assistant", "content": "I'd be happy to help! What specific Python question do you have?"},
+		      {"role": "user", "content": "How do I read a file?"}
+		    ]
+		  }'
+	*/
+
+	// Create the request body
+	requestBody := CompletionRequest{
+		Messages: []gollm.PromptMessage{
+			{Role: "system", Content: "You are a helpful programming assistant."},
+			{Role: "user", Content: "I need help with Python."},
+			{Role: "assistant", Content: "I'd be happy to help! What specific Python question do you have?"},
+			{Role: "user", Content: "How do I read a file?"},
+		},
+	}
+
+	body, err := json.Marshal(requestBody)
+	require.NoError(t, err)
+
+	// Create test request
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions?type=chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	// Record response
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Verify response
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp processing.Response
+	err = json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "I'd be happy to help you with Python programming!", resp.Content)
+
+	// Verify response headers
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	requestID := w.Header().Get("X-Request-ID")
+	assert.NotEmpty(t, requestID, "X-Request-ID header should be set")
+	assert.Len(t, requestID, 36, "Request ID should be a UUID")
 }

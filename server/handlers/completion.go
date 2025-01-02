@@ -22,33 +22,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// CompletionRequest represents a simple text completion request.
-// This is the default request type when no specific type is specified.
+// CompletionRequest represents a completion request with message history.
+// This is the primary request type that supports both simple text and chat completions.
 // All fields are validated before processing.
 type CompletionRequest struct {
-	Input string `json:"input" validate:"required"` // The input text to complete
-}
+	// Messages is the primary field for all requests. For simple completions,
+	// a single user message is created from the Input field.
+	Messages []gollm.PromptMessage `json:"messages,omitempty" validate:"omitempty,min=1"`
 
-// ChatRequest represents a chat-style request with message history.
-// It follows the gollm chat format with roles and content.
-// Messages must be non-empty and contain valid roles.
-type ChatRequest struct {
-	Messages []gollm.PromptMessage `json:"messages" validate:"required,min=1"` // List of chat messages
-}
+	// Input is maintained for backward compatibility with simple completions.
+	// If present, it will be converted to a single user message.
+	Input string `json:"input,omitempty" validate:"omitempty"`
 
-// FunctionRequest represents a function calling request.
-// This is used for structured function-like interactions.
-// Both input and function description are required.
-type FunctionRequest struct {
-	Input               string `json:"input" validate:"required"`                // The input text
-	FunctionDescription string `json:"function_description" validate:"required"` // Description of the function to call
+	// FunctionDescription is used for function calling requests.
+	// If present, it will be included in the system context.
+	FunctionDescription string `json:"function_description,omitempty" validate:"omitempty"`
 }
 
 // CompletionHandler handles different types of completion requests.
 // It supports:
 // - Simple text completion (default)
 // - Chat completion with message history
-// - Function calling (future feature)
+// - Function calling
 type CompletionHandler struct {
 	processor *processing.Processor
 	logger    *zap.Logger
@@ -166,24 +161,53 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse and validate request based on type
-	var request *processing.Request
+	// Parse and validate request
+	var completionReq CompletionRequest
+	if err := json.Unmarshal(rawReq, &completionReq); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		errors.WriteError(w, errors.NewValidationError(
+			requestID,
+			"Invalid completion request format",
+			map[string]interface{}{
+				"type": requestType,
+			},
+		))
+		return
+	}
 
-	switch requestType {
-	case "default":
-		var completionReq CompletionRequest
-		if err := json.Unmarshal(rawReq, &completionReq); err != nil {
+	// Convert request to messages format
+	var messages []gollm.PromptMessage
+
+	// Handle function description if present
+	if completionReq.FunctionDescription != "" {
+		// Check description size
+		if len(completionReq.FunctionDescription) > 5*1024 {
+			logger.Warn("Function description too large",
+				zap.Int("size", len(completionReq.FunctionDescription)),
+			)
 			w.WriteHeader(http.StatusBadRequest)
 			errors.WriteError(w, errors.NewValidationError(
 				requestID,
-				"Invalid completion request format",
+				"Function description too large",
 				map[string]interface{}{
-					"type": requestType,
+					"type":        "function",
+					"max_size":    "5KB",
+					"actual_size": fmt.Sprintf("%dKB", len(completionReq.FunctionDescription)/1024),
 				},
 			))
 			return
 		}
+		// Add function description as system message
+		messages = append(messages, gollm.PromptMessage{
+			Role:    "system",
+			Content: completionReq.FunctionDescription,
+		})
+	}
 
+	// Handle messages or input
+	if len(completionReq.Messages) > 0 {
+		messages = append(messages, completionReq.Messages...)
+	} else if completionReq.Input != "" {
 		// Check input size
 		if len(completionReq.Input) > 512*1024 {
 			logger.Warn("Input too large",
@@ -201,143 +225,27 @@ func (h *CompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			))
 			return
 		}
-
-		if completionReq.Input == "" {
-			logger.Warn("Empty input")
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Input text is required",
-				map[string]interface{}{
-					"type": requestType,
-				},
-			))
-			return
-		}
-
-		logger.Debug("Parsed completion request",
-			zap.Int("input_length", len(completionReq.Input)),
-		)
-
-		request = &processing.Request{
-			Type:  requestType,
-			Input: completionReq.Input,
-		}
-
-	case "chat":
-		var chatReq ChatRequest
-		if err := json.Unmarshal(rawReq, &chatReq); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Invalid completion request format",
-				map[string]interface{}{
-					"type": requestType,
-				},
-			))
-			return
-		}
-
-		if len(chatReq.Messages) == 0 {
-			logger.Warn("Empty chat messages")
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Chat messages cannot be empty",
-				map[string]interface{}{
-					"type": requestType,
-				},
-			))
-			return
-		}
-
-		logger.Debug("Parsed chat request",
-			zap.Int("message_count", len(chatReq.Messages)),
-		)
-
-		request = &processing.Request{
-			Type:     requestType,
-			Messages: convertMessages(chatReq.Messages),
-		}
-
-	case "function":
-		var funcReq FunctionRequest
-		if err := json.Unmarshal(rawReq, &funcReq); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Invalid completion request format",
-				map[string]interface{}{
-					"type": requestType,
-				},
-			))
-			return
-		}
-
-		// Check description size
-		if len(funcReq.FunctionDescription) > 5*1024 {
-			logger.Warn("Function description too large",
-				zap.Int("size", len(funcReq.FunctionDescription)),
-			)
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Function description too large",
-				map[string]interface{}{
-					"type":        "function",
-					"max_size":    "5KB",
-					"actual_size": fmt.Sprintf("%dKB", len(funcReq.FunctionDescription)/1024),
-				},
-			))
-			return
-		}
-
-		if funcReq.Input == "" || funcReq.FunctionDescription == "" {
-			missingFields := []string{}
-			if funcReq.Input == "" {
-				missingFields = append(missingFields, "input")
-			}
-			if funcReq.FunctionDescription == "" {
-				missingFields = append(missingFields, "function_description")
-			}
-			logger.Warn("Missing required fields",
-				zap.Strings("missing_fields", missingFields),
-			)
-			w.WriteHeader(http.StatusBadRequest)
-			errors.WriteError(w, errors.NewValidationError(
-				requestID,
-				"Function input and description are required",
-				map[string]interface{}{
-					"type":           requestType,
-					"missing_fields": missingFields,
-				},
-			))
-			return
-		}
-
-		logger.Debug("Parsed function request",
-			zap.Int("input_length", len(funcReq.Input)),
-			zap.Int("description_length", len(funcReq.FunctionDescription)),
-		)
-
-		request = &processing.Request{
-			Type:                requestType,
-			Input:               funcReq.Input,
-			FunctionDescription: funcReq.FunctionDescription,
-		}
-
-	default:
-		logger.Warn("Invalid request type")
+		messages = append(messages, gollm.PromptMessage{
+			Role:    "user",
+			Content: completionReq.Input,
+		})
+	} else {
+		logger.Warn("No input or messages provided")
 		w.WriteHeader(http.StatusBadRequest)
 		errors.WriteError(w, errors.NewValidationError(
 			requestID,
-			"Invalid request type",
+			"Either input or messages must be provided",
 			map[string]interface{}{
-				"type":            requestType,
-				"supported_types": []string{"default", "chat", "function"},
+				"type": requestType,
 			},
 		))
 		return
+	}
+
+	// Create processing request
+	request := &processing.Request{
+		Type:     requestType,
+		Messages: convertMessages(messages),
 	}
 
 	// Create context with timeout header if present
