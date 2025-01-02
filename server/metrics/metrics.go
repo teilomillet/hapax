@@ -68,10 +68,20 @@ func NewMetrics() *Metrics {
 	registry.MustRegister(collectors.NewGoCollector())
 	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
+	// Initialize some default metrics
+	m.RequestsTotal.WithLabelValues("/health", "200").Add(0)
+	m.RequestsTotal.WithLabelValues("/metrics", "200").Add(0)
+	m.RequestDuration.WithLabelValues("/health").Observe(0)
+	m.RequestDuration.WithLabelValues("/metrics").Observe(0)
+	m.ActiveRequests.WithLabelValues("queued").Add(0)
+	m.ActiveRequests.WithLabelValues("processing").Add(0)
+
 	return m
 }
 
 // Handler returns a handler for the metrics endpoint.
 func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{
+		EnableOpenMetrics: false, // Disable OpenMetrics format to avoid escaping=values
+	})
 }

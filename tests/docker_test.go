@@ -223,7 +223,7 @@ CMD ["./hapax", "--config", "/app/config.yaml"]
 		defer resp.Body.Close()
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		assert.Equal(t, "text/plain; version=0.0.4; charset=utf-8", resp.Header.Get("Content-Type"))
+		assert.Equal(t, "text/plain; version=0.0.4; charset=utf-8; escaping=values", resp.Header.Get("Content-Type"))
 
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err, "Should read metrics")

@@ -73,7 +73,7 @@ func TestPrometheusMetrics(t *testing.T) {
 			assert.Equal(t, float64(1), requestCount)
 
 			// Check active requests (should be 0 after request completes)
-			activeRequests := testutil.ToFloat64(m.ActiveRequests)
+			activeRequests := testutil.ToFloat64(m.ActiveRequests.WithLabelValues(tt.expectedPath))
 			assert.Equal(t, float64(0), activeRequests)
 
 			// Check error metrics for 5xx responses
