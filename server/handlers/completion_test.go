@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -385,4 +386,93 @@ func TestCurlMultiMessageExample(t *testing.T) {
 	requestID := w.Header().Get("X-Request-ID")
 	assert.NotEmpty(t, requestID, "X-Request-ID header should be set")
 	assert.Len(t, requestID, 36, "Request ID should be a UUID")
+}
+
+func TestCurlCommandFormat(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	// Create mock LLM
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "Hello! How can I help you today?", nil
+	})
+
+	// Configure processor
+	cfg := &config.ProcessingConfig{
+		RequestTemplates: map[string]string{
+			"chat": "{{range .Messages}}{{.Role}}: {{.Content}}\n{{end}}",
+		},
+	}
+
+	processor, err := processing.NewProcessor(cfg, mockLLM)
+	require.NoError(t, err)
+
+	// Create handler with middleware
+	baseHandler := NewCompletionHandler(processor, logger)
+	handler := middleware.RequestID(baseHandler)
+
+	tests := []struct {
+		name           string
+		requestBody    string
+		expectedStatus int
+		expectedResp   string
+	}{
+		{
+			name: "simple chat message",
+			requestBody: `{
+				"messages": [
+					{
+						"role": "user",
+						"content": "Hello"
+					}
+				]
+			}`,
+			expectedStatus: http.StatusOK,
+			expectedResp:   "Hello! How can I help you today?",
+		},
+		{
+			name: "chat with system message",
+			requestBody: `{
+				"messages": [
+					{
+						"role": "system",
+						"content": "You are a helpful assistant."
+					},
+					{
+						"role": "user",
+						"content": "Hello"
+					}
+				]
+			}`,
+			expectedStatus: http.StatusOK,
+			expectedResp:   "Hello! How can I help you today?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create request
+			req := httptest.NewRequest(http.MethodPost, "/v1/completions?type=chat", strings.NewReader(tt.requestBody))
+			req.Header.Set("Content-Type", "application/json")
+
+			// Record response
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			// Verify status code
+			assert.Equal(t, tt.expectedStatus, w.Code)
+
+			if tt.expectedStatus == http.StatusOK {
+				var resp processing.Response
+				err := json.NewDecoder(w.Body).Decode(&resp)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedResp, resp.Content)
+			}
+
+			// Verify headers
+			assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			requestID := w.Header().Get("X-Request-ID")
+			assert.NotEmpty(t, requestID)
+			assert.Len(t, requestID, 36)
+		})
+	}
 }

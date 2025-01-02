@@ -102,14 +102,19 @@ func (p *Processor) ProcessRequest(ctx context.Context, req *Request) (*Response
 
 	// Now we have two clear paths - either conversation or single input
 	if len(req.Messages) > 0 {
+		// Add debug logging for chat requests
+		fmt.Printf("DEBUG: Processing chat request with %d messages\n", len(req.Messages))
 		// For conversations, we just need to convert the messages directly
 		for _, msg := range req.Messages {
+			fmt.Printf("DEBUG: Adding message - Role: '%s', Content: '%s'\n", msg.Role, msg.Content)
 			promptMessages = append(promptMessages, gollm.PromptMessage{
 				Role:    msg.Role,
 				Content: msg.Content,
 			})
 		}
 	} else if req.Input != "" {
+		// Add debug logging for single input requests
+		fmt.Printf("DEBUG: Processing single input request: '%s'\n", req.Input)
 		// For single inputs, we still use the template system
 		tmpl := p.templates["default"]
 		if t, ok := p.templates[req.Type]; ok {
@@ -133,6 +138,13 @@ func (p *Processor) ProcessRequest(ctx context.Context, req *Request) (*Response
 	}
 
 	prompt := &gollm.Prompt{Messages: promptMessages}
+
+	// Add debug logging
+	fmt.Printf("DEBUG: About to send prompt to LLM: %+v\n", prompt)
+	fmt.Printf("DEBUG: Number of messages in prompt: %d\n", len(prompt.Messages))
+	for i, msg := range prompt.Messages {
+		fmt.Printf("DEBUG: Message[%d] - Role: '%s', Content: '%s'\n", i, msg.Role, msg.Content)
+	}
 
 	response, err := p.llm.Generate(ctx, prompt)
 	if err != nil {
