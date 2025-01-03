@@ -100,7 +100,8 @@ func TestHTTP3ServerRealistic(t *testing.T) {
 				MaxUniStreamsConcurrent:    100,
 				MaxStreamReceiveWindow:     1 * 1024 * 1024, // 1MB
 				MaxConnectionReceiveWindow: 2 * 1024 * 1024, // 2MB
-				UDPReceiveBufferSize:       416 * 1024,      // Use the actual size we can get (416KB)
+				UDPReceiveBufferSize:       2 * 1024 * 1024, // Use 2MB which is typically available
+				Enable0RTT:                 true,
 			},
 		},
 		LLM: config.LLMConfig{

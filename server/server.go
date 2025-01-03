@@ -355,11 +355,15 @@ func (s *Server) applyConfigUpdate(newConfig *config.Config) error {
 		return fmt.Errorf("failed to update server config: %w", err)
 	}
 
-	// Start the new server
-	s.mu.Lock()
+	// Verify server initialization
+	s.mu.RLock()
 	httpServer := s.httpServer
 	http3Server := s.http3Server
-	s.mu.Unlock()
+	if httpServer == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("server initialization failed: httpServer is nil after config update")
+	}
+	s.mu.RUnlock()
 
 	// Start HTTP server
 	go func() {
