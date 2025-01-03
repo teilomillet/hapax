@@ -86,6 +86,19 @@ type HTTP3Config struct {
 
 	// MaxConnectionReceiveWindow is the connection-level flow control window for receiving data
 	MaxConnectionReceiveWindow uint64 `yaml:"max_connection_receive_window"`
+
+	// Enable0RTT enables 0-RTT (early data) support
+	Enable0RTT bool `yaml:"enable_0rtt"`
+
+	// Max0RTTSize is the maximum size of 0-RTT data in bytes
+	Max0RTTSize uint32 `yaml:"max_0rtt_size"`
+
+	// Allow0RTTReplay determines if 0-RTT anti-replay protection is enabled
+	Allow0RTTReplay bool `yaml:"allow_0rtt_replay"`
+
+	// UDPReceiveBufferSize is the size of the UDP receive buffer in bytes
+	// A larger buffer can help prevent packet loss under high load
+	UDPReceiveBufferSize uint32 `yaml:"udp_receive_buffer_size"`
 }
 
 // LLMConfig holds LLM-specific configuration.
@@ -319,6 +332,10 @@ func DefaultConfig() *Config {
 				MaxUniStreamsConcurrent:    100,
 				MaxStreamReceiveWindow:     6 * 1024 * 1024,  // 6MB
 				MaxConnectionReceiveWindow: 15 * 1024 * 1024, // 15MB
+				Enable0RTT:                 true,             // Enable by default for better performance
+				Max0RTTSize:                16 * 1024,        // 16KB default max size
+				Allow0RTTReplay:            false,            // Disable replay by default for security
+				UDPReceiveBufferSize:       8 * 1024 * 1024,  // 8MB UDP receive buffer
 			},
 		},
 
@@ -608,6 +625,15 @@ func (c *Config) Validate() error {
 		}
 		if _, err := os.Stat(c.Server.HTTP3.TLSKeyFile); err != nil {
 			return fmt.Errorf("HTTP/3 TLS key file not accessible: %w", err)
+		}
+		// Validate 0-RTT configuration
+		if c.Server.HTTP3.Enable0RTT {
+			if c.Server.HTTP3.Max0RTTSize == 0 {
+				return fmt.Errorf("HTTP/3 max 0-RTT size must be positive when 0-RTT is enabled")
+			}
+			if c.Server.HTTP3.Max0RTTSize > 1024*1024 { // 1MB max
+				return fmt.Errorf("HTTP/3 max 0-RTT size exceeds maximum allowed (1MB)")
+			}
 		}
 	}
 

@@ -3,9 +3,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -213,12 +217,33 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 			MaxIncomingStreams:         cfg.Server.HTTP3.MaxBiStreamsConcurrent,
 			MaxIncomingUniStreams:      cfg.Server.HTTP3.MaxUniStreamsConcurrent,
 			KeepAlivePeriod:            cfg.Server.HTTP3.IdleTimeout / 2,
+			Allow0RTT:                  cfg.Server.HTTP3.Enable0RTT,
+		}
+
+		// If 0-RTT is enabled but replay is not allowed, wrap the handler
+		var http3Handler http.Handler = handler
+		if cfg.Server.HTTP3.Enable0RTT && !cfg.Server.HTTP3.Allow0RTTReplay {
+			http3Handler = &replayProtectionHandler{
+				handler: handler,
+				logger:  s.logger,
+				seen:    sync.Map{},
+				maxSize: cfg.Server.HTTP3.Max0RTTSize,
+				enabled: cfg.Server.HTTP3.Enable0RTT,
+				allowed: cfg.Server.HTTP3.Allow0RTTReplay,
+			}
 		}
 
 		newHTTP3Server = &http3.Server{
 			Addr:       fmt.Sprintf(":%d", cfg.Server.HTTP3.Port),
-			Handler:    handler,
+			Handler:    http3Handler,
 			QUICConfig: quicConfig,
+		}
+
+		// Configure UDP receive buffer size
+		if cfg.Server.HTTP3.UDPReceiveBufferSize > 0 {
+			if err := configureUDPBufferSize(cfg.Server.HTTP3.UDPReceiveBufferSize); err != nil {
+				s.logger.Warn("Failed to set UDP receive buffer size", zap.Error(err))
+			}
 		}
 	}
 
@@ -397,4 +422,88 @@ func (s *Server) Start(ctx context.Context) error {
 
 		return nil
 	}
+}
+
+// configureUDPBufferSize attempts to set the UDP receive buffer size
+func configureUDPBufferSize(size uint32) error {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+	if err != nil {
+		return fmt.Errorf("create test UDP connection: %w", err)
+	}
+	defer conn.Close()
+
+	return conn.SetReadBuffer(int(size))
+}
+
+// replayProtectionHandler implements replay protection for POST requests
+type replayProtectionHandler struct {
+	handler http.Handler
+	logger  *zap.Logger
+	seen    sync.Map
+	maxSize uint32
+	enabled bool
+	allowed bool
+}
+
+func (h *replayProtectionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Only apply replay protection to POST requests
+	if r.Method == http.MethodPost && h.enabled && !h.allowed {
+		// Calculate request hash (URL + headers + body)
+		hash, err := h.calculateRequestHash(r)
+		if err != nil {
+			h.logger.Error("Failed to calculate request hash", zap.Error(err))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		// Check if we've seen this request before
+		if _, loaded := h.seen.LoadOrStore(hash, time.Now()); loaded {
+			h.logger.Debug("Rejected replayed request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("hash", hash))
+			http.Error(w, "Request replay not allowed", http.StatusTooEarly)
+			return
+		}
+
+		// Clean up old entries periodically (could be moved to a background task)
+		h.cleanupOldEntries()
+	}
+
+	h.handler.ServeHTTP(w, r)
+}
+
+func (h *replayProtectionHandler) calculateRequestHash(r *http.Request) (string, error) {
+	// Read body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Create hash of URL + headers + body
+	hasher := sha256.New()
+	hasher.Write([]byte(r.URL.String()))
+
+	// Add selected headers to hash
+	headers := []string{"Content-Type", "Authorization"}
+	for _, header := range headers {
+		hasher.Write([]byte(r.Header.Get(header)))
+	}
+
+	hasher.Write(body)
+	return base64.StdEncoding.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func (h *replayProtectionHandler) cleanupOldEntries() {
+	now := time.Now()
+	h.seen.Range(func(key, value interface{}) bool {
+		if timestamp, ok := value.(time.Time); ok {
+			// Remove entries older than 5 minutes
+			if now.Sub(timestamp) > 5*time.Minute {
+				h.seen.Delete(key)
+			}
+		}
+		return true
+	})
 }
