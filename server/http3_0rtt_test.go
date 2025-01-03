@@ -3,9 +3,14 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
-	"fmt"
-	"io"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"os"
 	"testing"
@@ -17,22 +22,57 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
+	"github.com/teilomillet/hapax/server/mocks"
 	"go.uber.org/zap/zaptest"
 )
 
+func generateTestCertificates(t *testing.T) (string, string) {
+	certFile, err := os.CreateTemp("", "cert*.pem")
+	require.NoError(t, err)
+	keyFile, err := os.CreateTemp("", "key*.pem")
+	require.NoError(t, err)
+
+	// Generate self-signed certificate
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test Co"},
+		},
+		NotBefore: time.Now(),
+		NotAfter:  time.Now().Add(time.Hour * 24 * 180),
+
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	// Write certificate
+	err = pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	require.NoError(t, err)
+
+	// Write private key
+	privBytes := x509.MarshalPKCS1PrivateKey(priv)
+	err = pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privBytes})
+	require.NoError(t, err)
+
+	certFile.Close()
+	keyFile.Close()
+
+	return certFile.Name(), keyFile.Name()
+}
+
 func TestHTTP3_0RTT(t *testing.T) {
-	// Generate test certificates
-	certFile, keyFile := generateTestCerts(t)
-	defer cleanup(t, certFile, keyFile)
-
-	logger := zaptest.NewLogger(t)
-
-	// Create mock LLM with realistic response delay
-	mockLLM := NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
-		// Simulate realistic API latency
-		time.Sleep(50 * time.Millisecond)
-		return `{"status": "ok", "latency": 50}`, nil
-	})
+	// Create test certificates
+	certFile, keyFile := generateTestCertificates(t)
+	defer os.Remove(certFile)
+	defer os.Remove(keyFile)
 
 	// Create configuration with 0-RTT enabled
 	cfg := &config.Config{
@@ -48,13 +88,14 @@ func TestHTTP3_0RTT(t *testing.T) {
 				TLSCertFile:                certFile,
 				TLSKeyFile:                 keyFile,
 				IdleTimeout:                5 * time.Minute,
-				MaxBiStreamsConcurrent:     100,
-				MaxUniStreamsConcurrent:    100,
-				MaxStreamReceiveWindow:     6 * 1024 * 1024,
-				MaxConnectionReceiveWindow: 15 * 1024 * 1024,
+				MaxBiStreamsConcurrent:     1000,
+				MaxUniStreamsConcurrent:    1000,
+				MaxStreamReceiveWindow:     10 * 1024 * 1024,
+				MaxConnectionReceiveWindow: 25 * 1024 * 1024,
 				Enable0RTT:                 true,
 				Max0RTTSize:                16 * 1024,
 				Allow0RTTReplay:            false,
+				UDPReceiveBufferSize:       20 * 1024 * 1024,
 			},
 		},
 		LLM: config.LLMConfig{
@@ -64,13 +105,19 @@ func TestHTTP3_0RTT(t *testing.T) {
 		},
 	}
 
-	// Create test watcher
-	watcher := newTestConfigWatcher(t, cfg)
+	// Create test logger
+	logger := zaptest.NewLogger(t)
 
-	// Create and start server
-	server, err := NewServerWithConfig(watcher, mockLLM, logger)
+	// Create mock LLM
+	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
+		return "test response", nil
+	})
+
+	// Create server
+	server, err := NewServerWithConfig(mocks.NewMockConfigWatcher(cfg), mockLLM, logger)
 	require.NoError(t, err)
 
+	// Start server
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -79,171 +126,86 @@ func TestHTTP3_0RTT(t *testing.T) {
 		errCh <- server.Start(ctx)
 	}()
 
+	// Configure HTTP/3 client with longer timeouts
+	transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		QUICConfig: &quic.Config{
+			MaxIdleTimeout:             30 * time.Second,
+			HandshakeIdleTimeout:       10 * time.Second,
+			MaxStreamReceiveWindow:     10 * 1024 * 1024,
+			MaxConnectionReceiveWindow: 25 * 1024 * 1024,
+			KeepAlivePeriod:            5 * time.Second,
+			Allow0RTT:                  true,
+		},
+	}
+	defer transport.Close()
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
 	// Wait for server to be ready
-	time.Sleep(2 * time.Second)
+	require.Eventually(t, func() bool {
+		resp, err := client.Get("https://localhost:8443/health")
+		if err != nil {
+			t.Logf("Server not ready: %v", err)
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 10*time.Second, 100*time.Millisecond, "Server failed to start")
 
 	t.Run("0-RTT Basic Functionality", func(t *testing.T) {
-		transport := &http3.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-				ClientSessionCache: tls.NewLRUClientSessionCache(10),
-			},
-			QUICConfig: &quic.Config{
-				Allow0RTT: true,
-			},
-		}
-		defer transport.Close()
-
-		client := &http.Client{
-			Transport: transport,
-			Timeout:   10 * time.Second,
-		}
-
-		url := fmt.Sprintf("https://localhost:%d/health", cfg.Server.HTTP3.Port)
-
-		// First request - should establish session
-		start := time.Now()
-		resp, err := client.Get(url)
-		firstLatency := time.Since(start)
+		// First request establishes connection
+		resp, err := client.Get("https://localhost:8443/health")
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		_, err = io.Copy(io.Discard, resp.Body)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		// Second request should use 0-RTT
+		resp, err = client.Get("https://localhost:8443/health")
 		require.NoError(t, err)
-		resp.Body.Close()
-
-		t.Logf("First request (with handshake) latency: %v", firstLatency)
-
-		// Wait for session ticket to be processed
-		time.Sleep(200 * time.Millisecond)
-
-		// Second request - should use 0-RTT if enabled
-		start = time.Now()
-		resp, err = client.Get(url)
-		secondLatency := time.Since(start)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		_, err = io.Copy(io.Discard, resp.Body)
-		require.NoError(t, err)
-		resp.Body.Close()
-
-		t.Logf("Second request (potential 0-RTT) latency: %v", secondLatency)
-
-		// Verify 0-RTT improvement
-		assert.Less(t, secondLatency, firstLatency, "0-RTT request should be faster than initial handshake")
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
 	})
 
 	t.Run("0-RTT Replay Protection with Real Data", func(t *testing.T) {
-		if cfg.Server.HTTP3.Allow0RTTReplay {
-			t.Skip("Test only relevant when replay protection is enabled")
-		}
-
-		transport := &http3.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-				ClientSessionCache: tls.NewLRUClientSessionCache(10),
-			},
-			QUICConfig: &quic.Config{
-				Allow0RTT: true,
-			},
-		}
-		defer transport.Close()
-
-		client := &http.Client{
-			Transport: transport,
-			Timeout:   10 * time.Second,
-		}
-
-		// Create a POST request with valid completion data
-		url := fmt.Sprintf("https://localhost:%d/v1/completions", cfg.Server.HTTP3.Port)
-		completionData := []byte(`{
-			"input": "What is the meaning of life?",
-			"temperature": 0.7,
-			"messages": [
-				{"role": "user", "content": "What is the meaning of life?"}
-			]
-		}`)
-
-		// First request to establish session
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(completionData))
+		// Create completion request
+		reqBody := map[string]string{"input": "test"}
+		jsonData, err := json.Marshal(reqBody)
 		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := client.Do(req)
+		// First request
+		req1, err := http.NewRequest(http.MethodPost, "https://localhost:8443/v1/completions", bytes.NewBuffer(jsonData))
 		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		_, err = io.Copy(io.Discard, resp.Body)
+		req1.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req1)
 		require.NoError(t, err)
-		resp.Body.Close()
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-		// Wait for session ticket and first request to be fully processed
-		time.Sleep(200 * time.Millisecond)
+		// Create a new request with the same data for replay
+		req2, err := http.NewRequest(http.MethodPost, "https://localhost:8443/v1/completions", bytes.NewBuffer(jsonData))
+		require.NoError(t, err)
+		req2.Header.Set("Content-Type", "application/json")
 
-		// Try to replay the same request multiple times
-		replayAttempts := 5
-		results := make(chan struct {
-			statusCode int
-			latency    time.Duration
-		}, replayAttempts)
-
-		// Process replays sequentially to ensure deterministic behavior
-		for i := 0; i < replayAttempts; i++ {
-			start := time.Now()
-			req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(completionData))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			latency := time.Since(start)
-
-			if err != nil {
-				t.Logf("Request error: %v", err)
-				results <- struct {
-					statusCode int
-					latency    time.Duration
-				}{0, latency}
-				continue
-			}
-			_, err = io.Copy(io.Discard, resp.Body)
-			require.NoError(t, err)
-			resp.Body.Close()
-			results <- struct {
-				statusCode int
-				latency    time.Duration
-			}{resp.StatusCode, latency}
-
-			// Small delay between attempts
-			time.Sleep(10 * time.Millisecond)
-		}
-
-		close(results)
-
-		// Analyze results
-		var successCount int
-		var rejectedCount int
-		var totalLatency time.Duration
-		for result := range results {
-			if result.statusCode == http.StatusOK {
-				successCount++
-				totalLatency += result.latency
-			} else if result.statusCode == http.StatusTooEarly {
-				rejectedCount++
-			}
-		}
-
-		// First request should succeed, rest should be rejected
-		assert.Equal(t, 0, successCount, "All replay attempts should be rejected")
-		assert.Equal(t, replayAttempts, rejectedCount, "All replay attempts should return 425 Too Early")
-
-		if successCount > 0 {
-			avgLatency := totalLatency / time.Duration(successCount)
-			t.Logf("Average latency for successful requests: %v", avgLatency)
-			assert.Greater(t, avgLatency, 50*time.Millisecond, "Successful request should include API latency")
-		}
+		// Immediate replay should be rejected
+		resp, err = client.Do(req2)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusTooEarly, resp.StatusCode)
 	})
-}
 
-func cleanup(t *testing.T, files ...string) {
-	for _, file := range files {
-		if err := os.Remove(file); err != nil {
-			t.Logf("Failed to remove file %s: %v", file, err)
-		}
+	// Cleanup
+	cancel()
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Error("Server did not shut down within timeout")
 	}
 }

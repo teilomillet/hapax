@@ -10,8 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/teilomillet/hapax/server/middleware"
 	"github.com/teilomillet/hapax/server/processing"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // Router handles HTTP routing and middleware configuration.
@@ -83,15 +87,24 @@ func NewRouter(llm gollm.LLM, cfg *config.Config, logger *zap.Logger) *Router {
 	// Create new completion handler using the handlers package
 	completionHandler := handlers.NewCompletionHandler(processor, logger)
 
+	// Add replay protection to the completion handler
+	replayProtection := &replayProtectionHandler{
+		handler: completionHandler,
+		logger:  logger,
+		enabled: true,
+		allowed: false,
+		maxSize: 1000, // Maximum number of request hashes to store
+	}
+
 	router := &Router{
 		router:     r,
-		completion: completionHandler,
+		completion: replayProtection,
 		metrics:    m,
 	}
 
 	// Mount routes
 	// Completion endpoint for LLM requests
-	r.Post("/v1/completions", completionHandler.ServeHTTP)
+	r.Post("/v1/completions", replayProtection.ServeHTTP)
 
 	// Health check endpoint for container orchestration
 	// Returns 200 OK with {"status": "ok"} when the service is healthy
@@ -127,12 +140,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // This ensures that multiple goroutines do not interfere with each other when checking or updating the server's status.
 type Server struct {
 	httpServer  *http.Server
-	http3Server *http3.Server // HTTP/3 server instance
+	http3Server *http3.Server
 	config      config.Watcher
 	logger      *zap.Logger
 	llm         gollm.LLM
-	running     bool       // Track server state
-	mu          sync.Mutex // Protect state changes
+	running     bool
+	mu          sync.RWMutex
 }
 
 // NewServer creates a new server with the specified configuration and handler.
@@ -196,121 +209,50 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// If there's an existing server, shut it down gracefully first
+	if s.httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+		defer cancel()
+
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown existing server: %w", err)
+		}
+	}
+
+	// If there's an existing HTTP/3 server, shut it down gracefully
+	if s.http3Server != nil {
+		if err := s.http3Server.Close(); err != nil {
+			return fmt.Errorf("failed to shutdown existing HTTP/3 server: %w", err)
+		}
+	}
+
+	// Create router
+	router := NewRouter(s.llm, cfg, s.logger)
+
 	// Create new HTTP server instance
-	newServer := &http.Server{
+	s.httpServer = &http.Server{
 		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:        NewRouter(s.llm, cfg, s.logger),
+		Handler:        router,
 		ReadTimeout:    cfg.Server.ReadTimeout,
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
 	}
 
-	// Create new HTTP/3 server if enabled
-	var newHTTP3Server *http3.Server
-	if cfg.Server.HTTP3.Enabled {
-		quicConfig := &quic.Config{
-			MaxStreamReceiveWindow:     cfg.Server.HTTP3.MaxStreamReceiveWindow,
-			MaxConnectionReceiveWindow: cfg.Server.HTTP3.MaxConnectionReceiveWindow,
-			MaxIncomingStreams:         cfg.Server.HTTP3.MaxBiStreamsConcurrent,
-			MaxIncomingUniStreams:      cfg.Server.HTTP3.MaxUniStreamsConcurrent,
-			KeepAlivePeriod:            cfg.Server.HTTP3.IdleTimeout / 2,
-			Allow0RTT:                  cfg.Server.HTTP3.Enable0RTT,
-		}
-
-		// If 0-RTT is enabled but replay is not allowed, wrap the handler
-		var http3Handler http.Handler = NewRouter(s.llm, cfg, s.logger)
-		if cfg.Server.HTTP3.Enable0RTT && !cfg.Server.HTTP3.Allow0RTTReplay {
-			http3Handler = &replayProtectionHandler{
-				handler: NewRouter(s.llm, cfg, s.logger),
-				logger:  s.logger,
-				seen:    sync.Map{},
-				maxSize: cfg.Server.HTTP3.Max0RTTSize,
-				enabled: cfg.Server.HTTP3.Enable0RTT,
-				allowed: cfg.Server.HTTP3.Allow0RTTReplay,
-			}
-		}
-
-		newHTTP3Server = &http3.Server{
-			Addr:       fmt.Sprintf(":%d", cfg.Server.HTTP3.Port),
-			Handler:    http3Handler,
-			QUICConfig: quicConfig,
-		}
-
-		// Configure UDP receive buffer size
-		if cfg.Server.HTTP3.UDPReceiveBufferSize > 0 {
-			if err := configureUDPBufferSize(cfg.Server.HTTP3.UDPReceiveBufferSize); err != nil {
-				s.logger.Warn("Failed to set UDP receive buffer size", zap.Error(err))
-			}
-		}
-	}
-
-	wasRunning := s.running
-	if wasRunning {
-		// Gracefully shutdown existing server
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("failed to shutdown existing server: %w", err)
-		}
-
-		// Shutdown HTTP/3 server if it exists
-		http3Server := s.http3Server
-		if http3Server != nil {
-			if err := http3Server.Close(); err != nil {
-				s.logger.Error("Failed to close HTTP/3 server", zap.Error(err))
-			}
-		}
-		s.running = false
-	}
-
-	// Update server instances
-	s.httpServer = newServer
-	s.http3Server = newHTTP3Server
-
-	// If we were running before, start the new server
-	if wasRunning {
-		s.running = true
-		go func() {
-			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-				s.logger.Error("HTTP server error", zap.Error(err))
-			}
-		}()
-
-		// IMPORTANT: Concurrent Access Pattern
-		// This pattern of separate declaration and assignment is intentional:
-		// 1. We need a stable reference to the HTTP/3 server that won't change
-		//    during the goroutine's lifetime, even if s.http3Server is modified
-		// 2. The separate declaration makes it clear we're capturing state
-		//    that will be used concurrently
-		// 3. This prevents potential race conditions where s.http3Server might
-		//    be modified while the goroutine is starting up
-		//nolint:gosimple // Separate declaration maintains clear capture semantics for concurrent access
-		var http3Server *http3.Server
-		http3Server = s.http3Server
-		if http3Server != nil {
-			// The goroutine captures the local http3Server variable,
-			// ensuring it has a consistent view of the server state
-			go func() {
-				if err := http3Server.ListenAndServeTLS(
-					cfg.Server.HTTP3.TLSCertFile,
-					cfg.Server.HTTP3.TLSKeyFile,
-				); err != http.ErrServerClosed {
-					s.logger.Error("HTTP/3 server error", zap.Error(err))
-				}
-			}()
-		}
-
-		// Wait for server to be ready
-		if err := s.waitForServer(cfg.Server.Port); err != nil {
-			return fmt.Errorf("server failed to start on new port: %w", err)
-		}
-
-		// Wait for HTTP/3 server if enabled
-		if http3Server != nil {
-			if err := s.waitForServer(cfg.Server.HTTP3.Port); err != nil {
-				return fmt.Errorf("HTTP/3 server failed to start on new port: %w", err)
-			}
+	// Configure HTTP/3 if enabled
+	if cfg.Server.HTTP3 != nil && cfg.Server.HTTP3.Enabled {
+		s.http3Server = &http3.Server{
+			Addr:            fmt.Sprintf(":%d", cfg.Server.HTTP3.Port),
+			Handler:         router,
+			MaxHeaderBytes:  cfg.Server.MaxHeaderBytes,
+			EnableDatagrams: true,
+			QUICConfig: &quic.Config{
+				MaxIdleTimeout:             cfg.Server.HTTP3.IdleTimeout,
+				MaxStreamReceiveWindow:     cfg.Server.HTTP3.MaxStreamReceiveWindow,
+				MaxConnectionReceiveWindow: cfg.Server.HTTP3.MaxConnectionReceiveWindow,
+				Allow0RTT:                  cfg.Server.HTTP3.Enable0RTT,
+				MaxIncomingStreams:         int64(cfg.Server.HTTP3.MaxBiStreamsConcurrent),
+				MaxIncomingUniStreams:      int64(cfg.Server.HTTP3.MaxUniStreamsConcurrent),
+			},
 		}
 	}
 
@@ -321,15 +263,40 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 // It attempts to connect multiple times to ensure that the server is fully initialized before proceeding.
 // This is crucial for confirming that the service is operational in its new location (port).
 func (s *Server) waitForServer(port int) error {
-	for i := 0; i < 50; i++ { // Try for 5 seconds (50 * 100ms)
+	// Helper function to check if port is in use
+	checkPort := func() error {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), 100*time.Millisecond)
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
+
+	// Try to connect multiple times
+	for i := 0; i < 50; i++ { // Try for 5 seconds (50 * 100ms)
+		err := checkPort()
 		if err == nil {
-			conn.Close()
+			// Port is available and server is listening
 			return nil
 		}
+
+		// Check if the error indicates the port is in use by another process
+		if opErr, ok := err.(*net.OpError); ok {
+			if syscallErr, ok := opErr.Err.(*os.SyscallError); ok {
+				if syscallErr.Syscall == "connect" {
+					// Port is in use, but not by our server
+					s.logger.Warn("Port is in use by another process",
+						zap.Int("port", port),
+						zap.Error(err))
+				}
+			}
+		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("server failed to start within timeout")
+
+	return fmt.Errorf("server failed to start on port %d within timeout", port)
 }
 
 // handleConfigUpdates listens for configuration changes and processes them.
@@ -349,14 +316,80 @@ func (s *Server) handleConfigUpdates(configChan <-chan *config.Config) {
 			s.llm = newLLM
 		}
 
-		// Update server configuration
-		if err := s.updateServerConfig(newConfig); err != nil {
-			s.logger.Error("Failed to update server config", zap.Error(err))
+		// Handle the configuration update in a separate function to properly scope the defer
+		if err := s.applyConfigUpdate(newConfig); err != nil {
+			s.logger.Error("Failed to apply config update", zap.Error(err))
 			continue
 		}
-
-		s.logger.Info("Server restarted with new configuration")
 	}
+}
+
+// applyConfigUpdate handles the actual configuration update process.
+// It manages the shutdown of existing servers and startup of new ones with updated configuration.
+func (s *Server) applyConfigUpdate(newConfig *config.Config) error {
+	// Create a context for the update operation
+	ctx, cancel := context.WithTimeout(context.Background(), newConfig.Server.ShutdownTimeout)
+	defer cancel() // This defer is now properly scoped
+
+	// Stop the current server
+	s.mu.Lock()
+	if s.httpServer != nil {
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			s.logger.Error("Failed to shutdown HTTP server", zap.Error(err))
+		}
+	}
+	if s.http3Server != nil {
+		if err := s.http3Server.Close(); err != nil {
+			s.logger.Error("Failed to shutdown HTTP/3 server", zap.Error(err))
+		}
+	}
+	s.httpServer = nil
+	s.http3Server = nil
+	s.mu.Unlock()
+
+	// Wait for ports to be released
+	time.Sleep(100 * time.Millisecond)
+
+	// Update server configuration
+	if err := s.updateServerConfig(newConfig); err != nil {
+		return fmt.Errorf("failed to update server config: %w", err)
+	}
+
+	// Start the new server
+	s.mu.Lock()
+	httpServer := s.httpServer
+	http3Server := s.http3Server
+	s.mu.Unlock()
+
+	// Start HTTP server
+	go func() {
+		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			s.logger.Error("HTTP server error", zap.Error(err))
+		}
+	}()
+
+	// Start HTTP/3 server if enabled
+	if http3Server != nil {
+		go func() {
+			if err := http3Server.ListenAndServeTLS(
+				newConfig.Server.HTTP3.TLSCertFile,
+				newConfig.Server.HTTP3.TLSKeyFile,
+			); err != http.ErrServerClosed {
+				s.logger.Error("HTTP/3 server error", zap.Error(err))
+			}
+		}()
+	}
+
+	// Wait for server to be ready
+	if err := s.waitForServer(newConfig.Server.Port); err != nil {
+		s.logger.Error("Server failed to start on new port", zap.Error(err))
+		return err
+	}
+
+	s.logger.Info("Server restarted with new configuration",
+		zap.Int("port", newConfig.Server.Port))
+
+	return nil
 }
 
 // Start begins serving HTTP requests and blocks until shutdown.
@@ -367,6 +400,15 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("server is already running")
 	}
+
+	// Initialize server configuration if not already done
+	if s.httpServer == nil {
+		if err := s.updateServerConfig(s.config.GetCurrentConfig()); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("failed to initialize server configuration: %w", err)
+		}
+	}
+
 	s.running = true
 	s.mu.Unlock()
 
@@ -377,22 +419,37 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	// Create error channel for server errors
-	errChan := make(chan error, 2) // Buffer for both HTTP and HTTP/3 errors
+	errChan := make(chan error, 2)
 
 	// Start HTTP server
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		s.mu.RLock()
+		httpServer := s.httpServer
+		s.mu.RUnlock()
+
+		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server error: %w", err)
 		}
 	}()
 
-	// Start HTTP/3 server if enabled
-	s.mu.Lock()
+	// Configure HTTP/3 if enabled
+	s.mu.RLock()
+	cfg := s.config.GetCurrentConfig()
 	http3Server := s.http3Server
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
-	if http3Server != nil {
-		cfg := s.config.GetCurrentConfig()
+	if cfg.Server.HTTP3 != nil && cfg.Server.HTTP3.Enabled && http3Server != nil {
+		// Try to configure UDP buffer size, but don't fail if we can't
+		if cfg.Server.HTTP3.UDPReceiveBufferSize > 0 {
+			if err := configureUDPBufferSize(cfg.Server.HTTP3.UDPReceiveBufferSize); err != nil {
+				// Log the error but continue - the server may still work with a smaller buffer
+				s.logger.Warn("Failed to configure UDP receive buffer size",
+					zap.Uint32("requested_size", cfg.Server.HTTP3.UDPReceiveBufferSize),
+					zap.Error(err))
+			}
+		}
+
+		// Start HTTP/3 server
 		go func() {
 			if err := http3Server.ListenAndServeTLS(
 				cfg.Server.HTTP3.TLSCertFile,
@@ -408,25 +465,62 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
+		s.mu.RLock()
+		httpServer := s.httpServer
+		http3Server := s.http3Server
+		s.mu.RUnlock()
+
 		// Graceful shutdown
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.GetCurrentConfig().Server.ShutdownTimeout)
 		defer cancel()
 
+		// Create error channel for shutdown errors
+		shutdownErrChan := make(chan error, 2)
+
 		// Shutdown HTTP server
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			s.logger.Error("Error during HTTP server shutdown", zap.Error(err))
-		}
+		go func() {
+			if err := httpServer.Shutdown(shutdownCtx); err != nil {
+				s.logger.Error("Error during HTTP server shutdown", zap.Error(err))
+				shutdownErrChan <- err
+			}
+			shutdownErrChan <- nil
+		}()
 
 		// Shutdown HTTP/3 server if it exists
-		s.mu.Lock()
-		http3Server := s.http3Server
-		s.mu.Unlock()
-
 		if http3Server != nil {
-			if err := http3Server.Close(); err != nil {
-				s.logger.Error("Error during HTTP/3 server shutdown", zap.Error(err))
+			go func() {
+				if err := http3Server.Close(); err != nil {
+					s.logger.Error("Error during HTTP/3 server shutdown", zap.Error(err))
+					shutdownErrChan <- err
+				}
+				shutdownErrChan <- nil
+			}()
+		}
+
+		// Wait for both servers to shut down or timeout
+		shutdownTimeout := time.After(s.config.GetCurrentConfig().Server.ShutdownTimeout)
+		shutdownCount := 1 // Start with 1 for HTTP server
+		if http3Server != nil {
+			shutdownCount++ // Add 1 for HTTP/3 server
+		}
+
+		for i := 0; i < shutdownCount; i++ {
+			select {
+			case err := <-shutdownErrChan:
+				if err != nil {
+					s.logger.Error("Server shutdown error", zap.Error(err))
+				}
+			case <-shutdownTimeout:
+				s.logger.Error("Server shutdown timed out")
+				return fmt.Errorf("server shutdown timed out")
 			}
 		}
+
+		// Clear server references
+		s.mu.Lock()
+		s.httpServer = nil
+		s.http3Server = nil
+		s.mu.Unlock()
 
 		return nil
 	}
@@ -434,13 +528,58 @@ func (s *Server) Start(ctx context.Context) error {
 
 // configureUDPBufferSize attempts to set the UDP receive buffer size
 func configureUDPBufferSize(size uint32) error {
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
-	if err != nil {
-		return fmt.Errorf("create test UDP connection: %w", err)
-	}
-	defer conn.Close()
+	// Try to set the buffer size with sysctl first
+	if err := exec.Command("sysctl", "-w", fmt.Sprintf("net.core.rmem_max=%d", size)).Run(); err != nil {
+		// Sysctl failed, which is expected in non-root environments
+		// Try to set it directly on the connection
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+		if err != nil {
+			return fmt.Errorf("create test UDP connection: %w", err)
+		}
+		defer conn.Close()
 
-	return conn.SetReadBuffer(int(size))
+		// Get initial buffer size for logging
+		initialSize, err := getUDPBufferSize(conn)
+		if err != nil {
+			return fmt.Errorf("get initial UDP buffer size: %w", err)
+		}
+
+		// Try to set the buffer size
+		if err := conn.SetReadBuffer(int(size)); err != nil {
+			return fmt.Errorf("set UDP read buffer (current: %d, requested: %d): %w", initialSize, size, err)
+		}
+
+		// Verify the actual buffer size
+		actualSize, err := getUDPBufferSize(conn)
+		if err != nil {
+			return fmt.Errorf("get UDP buffer size after setting: %w", err)
+		}
+
+		// On Linux, the actual buffer size is twice the requested size
+		// See: https://man7.org/linux/man-pages/man7/socket.7.html
+		effectiveSize := actualSize / 2
+		if effectiveSize < int(size) {
+			// If we couldn't get the full size, log a warning with the actual size we got
+			log.Printf("Warning: UDP receive buffer size smaller than requested (was: %d kiB, wanted: %d kiB, got: %d kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.",
+				initialSize/1024, size/1024, effectiveSize/1024)
+			return nil // Continue with the smaller buffer size
+		}
+	}
+	return nil
+}
+
+func getUDPBufferSize(conn *net.UDPConn) (int, error) {
+	f, err := conn.File()
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	size, err := unix.GetsockoptInt(int(f.Fd()), unix.SOL_SOCKET, unix.SO_RCVBUF)
+	if err != nil {
+		return 0, fmt.Errorf("getsockopt: %w", err)
+	}
+	return size, nil
 }
 
 // replayProtectionHandler implements replay protection for POST requests

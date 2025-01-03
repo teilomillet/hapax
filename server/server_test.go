@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	stderrors "errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,26 +29,88 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-// MockConfigWatcher implements a test version of the configuration watcher
+// MockConfigWatcher provides a thread-safe implementation of the config.Watcher interface for testing.
+// It simulates a configuration watcher that can handle dynamic configuration updates
+// while ensuring safe concurrent access from multiple goroutines.
+//
+// Thread Safety:
+// - Uses RWMutex to allow multiple concurrent readers but exclusive writers
+// - Ensures atomic updates of configuration state
+// - Safely handles channel operations for config updates
 type MockConfigWatcher struct {
-	currentConfig atomic.Value
+	// config holds the current configuration state
+	// Protected by mu for thread-safe access
+	config *config.Config
+
+	// ch is used to broadcast configuration updates to subscribers
+	// This channel is created once during initialization and closed on shutdown
+	ch chan *config.Config
+
+	// mu protects concurrent access to the config field
+	// Using RWMutex allows multiple readers with exclusive writer access
+	mu sync.RWMutex
 }
 
+// NewMockConfigWatcher creates a new mock config watcher with the provided initial configuration.
+// It initializes the update channel and sets up the initial state.
+//
+// Parameters:
+//   - cfg: The initial configuration to use
+//
+// Returns:
+//   - A new MockConfigWatcher instance ready for use in tests
 func NewMockConfigWatcher(cfg *config.Config) *MockConfigWatcher {
-	mcw := &MockConfigWatcher{}
-	mcw.currentConfig.Store(cfg)
-	return mcw
+	return &MockConfigWatcher{
+		config: cfg,
+		ch:     make(chan *config.Config),
+	}
 }
 
-func (m *MockConfigWatcher) GetCurrentConfig() *config.Config {
-	return m.currentConfig.Load().(*config.Config)
+// GetCurrentConfig returns the current configuration in a thread-safe manner.
+// Uses a read lock to allow concurrent reads while preventing reads during updates.
+//
+// Returns:
+//   - The current configuration state
+func (w *MockConfigWatcher) GetCurrentConfig() *config.Config {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.config
 }
 
-func (m *MockConfigWatcher) Subscribe() <-chan *config.Config {
-	return make(chan *config.Config)
+// Subscribe returns a channel for receiving configuration updates.
+// Subscribers can use this channel to be notified of configuration changes.
+// The channel is closed when the watcher is closed.
+//
+// Returns:
+//   - A read-only channel that receives configuration updates
+func (w *MockConfigWatcher) Subscribe() <-chan *config.Config {
+	return w.ch
 }
 
-func (m *MockConfigWatcher) Close() error {
+// UpdateConfig safely updates the current configuration and notifies all subscribers.
+// This method is thread-safe and ensures atomic updates of the configuration.
+//
+// Parameters:
+//   - cfg: The new configuration to apply
+//
+// Implementation Notes:
+//   - Acquires a write lock to prevent concurrent access during update
+//   - Updates the configuration atomically
+//   - Notifies all subscribers through the update channel
+func (w *MockConfigWatcher) UpdateConfig(cfg *config.Config) {
+	w.mu.Lock()
+	w.config = cfg
+	w.mu.Unlock()
+	w.ch <- cfg
+}
+
+// Close implements proper cleanup of the watcher resources.
+// It closes the update channel to signal subscribers that no more updates will be sent.
+//
+// Returns:
+//   - error: Always returns nil as the operation cannot fail
+func (w *MockConfigWatcher) Close() error {
+	close(w.ch)
 	return nil
 }
 
@@ -305,138 +369,171 @@ func TestRouterWithMiddleware(t *testing.T) {
 // It ensures that the server can handle configuration updates without service interruption.
 // This includes verifying that the server shuts down gracefully and starts correctly with new settings.
 func TestServer(t *testing.T) {
-	// Create a complete configuration for testing
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			Port:            8081,
-			ReadTimeout:     10 * time.Second,
-			WriteTimeout:    10 * time.Second,
-			MaxHeaderBytes:  1 << 20,
-			ShutdownTimeout: 30 * time.Second,
-			HTTP3: &config.HTTP3Config{
-				Enabled:                    false,
-				Port:                       8443,
-				MaxStreamReceiveWindow:     10 * 1024 * 1024,
-				MaxConnectionReceiveWindow: 15 * 1024 * 1024,
-				MaxBiStreamsConcurrent:     100,
-				MaxUniStreamsConcurrent:    100,
-				Enable0RTT:                 false,
-				Allow0RTTReplay:            false,
-				Max0RTTSize:                1024 * 1024,
-				UDPReceiveBufferSize:       1024 * 1024,
-				IdleTimeout:                30 * time.Second,
-			},
-		},
-		LLM: config.LLMConfig{
-			Provider: "mock",
-			Model:    "test",
-		},
+	// Helper function to check if port is in use
+	portInUse := func(port int) bool {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			return true
+		}
+		ln.Close()
+		return false
 	}
 
-	// Create test logger
-	logger, err := zap.NewDevelopment()
-	if err != nil {
-		t.Fatalf("Failed to create logger: %v", err)
+	// Helper function to wait for port to be available
+	waitForPortAvailable := func(port int) error {
+		for i := 0; i < 50; i++ { // Try for 5 seconds (50 * 100ms)
+			if !portInUse(port) {
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return fmt.Errorf("port %d is still in use after timeout", port)
 	}
 
-	// Create mock LLM with a test response
+	// Wait for ports to be available
+	ports := []int{9081, 9082}
+	for _, port := range ports {
+		require.NoError(t, waitForPortAvailable(port), "Port %d is still in use", port)
+	}
+
+	// Create test configuration
+	logger := zaptest.NewLogger(t)
+
+	// Create a mock LLM
 	mockLLM := mocks.NewMockLLM(func(ctx context.Context, prompt *gollm.Prompt) (string, error) {
 		return "test response", nil
 	})
 
-	// Create mock config watcher
-	mockWatcher := mocks.NewMockConfigWatcher(cfg)
-
-	// Create server with mocked dependencies
-	server, err := NewServerWithConfig(mockWatcher, mockLLM, logger)
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
+	// Create initial configuration
+	initialConfig := &config.Config{
+		Server: config.ServerConfig{
+			Port:            9081,
+			ReadTimeout:     30 * time.Second,
+			WriteTimeout:    30 * time.Second,
+			MaxHeaderBytes:  1 << 20,
+			ShutdownTimeout: 5 * time.Second,
+		},
+		LLM: config.LLMConfig{
+			Provider: "mock",
+			Model:    "test",
+			Options: map[string]interface{}{
+				"temperature": 0.7,
+			},
+		},
+		Logging: config.LoggingConfig{
+			Level:  "info",
+			Format: "json",
+		},
+		Routes: []config.RouteConfig{
+			{
+				Path:    "/health",
+				Handler: "health",
+				Version: "v1",
+			},
+		},
 	}
 
-	// Create context with cancel for server lifecycle
-	ctx, cancel := context.WithCancel(context.Background())
+	// Create and start server
+	watcher := NewMockConfigWatcher(initialConfig)
+	server, err := NewServerWithConfig(watcher, mockLLM, logger)
+	require.NoError(t, err)
+
+	// Create a context with timeout for the entire test
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Start server in background
-	errCh := make(chan error, 1)
+	// Start server in goroutine
+	serverErrChan := make(chan error, 1)
 	go func() {
-		errCh <- server.Start(ctx)
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErrChan <- err
+		}
+		close(serverErrChan)
 	}()
 
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("Health Check", func(t *testing.T) {
-		resp, err := http.Get("http://localhost:8081/health")
+	// Wait for server to be ready
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", initialConfig.Server.Port))
 		if err != nil {
-			t.Fatalf("Failed to connect to server: %v", err)
+			t.Logf("Connection attempt failed: %v", err)
+			return false
 		}
 		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 100*time.Millisecond, "Server failed to start")
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Health check failed: got %v, want %v",
-				resp.StatusCode, http.StatusOK)
-		}
+	// Run tests
+	t.Run("Health Check", func(t *testing.T) {
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", initialConfig.Server.Port))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
 	})
 
 	t.Run("Configuration Update", func(t *testing.T) {
 		// Create new configuration with different port
-		newCfg := &config.Config{
+		newConfig := &config.Config{
 			Server: config.ServerConfig{
-				Port:            8082,
-				ReadTimeout:     10 * time.Second,
-				WriteTimeout:    10 * time.Second,
+				Port:            9082,
+				ReadTimeout:     30 * time.Second,
+				WriteTimeout:    30 * time.Second,
 				MaxHeaderBytes:  1 << 20,
-				ShutdownTimeout: 30 * time.Second,
-				HTTP3: &config.HTTP3Config{
-					Enabled:                    false,
-					Port:                       8444,
-					MaxStreamReceiveWindow:     10 * 1024 * 1024,
-					MaxConnectionReceiveWindow: 15 * 1024 * 1024,
-					MaxBiStreamsConcurrent:     100,
-					MaxUniStreamsConcurrent:    100,
-					Enable0RTT:                 false,
-					Allow0RTTReplay:            false,
-					Max0RTTSize:                1024 * 1024,
-					UDPReceiveBufferSize:       1024 * 1024,
-					IdleTimeout:                30 * time.Second,
-				},
+				ShutdownTimeout: 5 * time.Second,
 			},
 			LLM: config.LLMConfig{
 				Provider: "mock",
 				Model:    "test",
+				Options: map[string]interface{}{
+					"temperature": 0.7,
+				},
+			},
+			Logging: config.LoggingConfig{
+				Level:  "info",
+				Format: "json",
+			},
+			Routes: []config.RouteConfig{
+				{
+					Path:    "/health",
+					Handler: "health",
+					Version: "v1",
+				},
 			},
 		}
 
 		// Update configuration
-		if err := server.updateServerConfig(newCfg); err != nil {
-			t.Fatalf("Failed to update server config: %v", err)
-		}
+		watcher.UpdateConfig(newConfig)
 
-		// The waitForServer method now ensures the server is ready before we test
-		resp, err := http.Get("http://localhost:8082/health")
-		if err != nil {
-			t.Fatalf("Failed to connect to server on new port: %v", err)
-		}
-		defer resp.Body.Close()
+		// Wait for server to be ready on new port
+		require.Eventually(t, func() bool {
+			resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", newConfig.Server.Port))
+			if err != nil {
+				t.Logf("Connection attempt failed: %v", err)
+				return false
+			}
+			defer resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}, 5*time.Second, 100*time.Millisecond, "Server failed to start on new port")
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Health check on new port failed: got %v, want %v",
-				resp.StatusCode, http.StatusOK)
-		}
+		// Check that old port is no longer in use
+		require.NoError(t, waitForPortAvailable(initialConfig.Server.Port), "Old port %d is still in use", initialConfig.Server.Port)
 	})
 
-	// Trigger server shutdown
+	// Cleanup
 	cancel()
 
-	// Check server stopped without error
+	// Wait for server to shut down
 	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("Server error: %v", err)
+	case err := <-serverErrChan:
+		if err != nil && err != context.Canceled {
+			require.NoError(t, err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Error("Server did not shut down within timeout")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Server failed to shut down")
+	}
+
+	// Wait for ports to be released
+	for _, port := range ports {
+		require.NoError(t, waitForPortAvailable(port), "Port %d was not released after server shutdown", port)
 	}
 }
 
