@@ -409,6 +409,12 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	// Ensure we have a valid server configuration
+	if s.httpServer == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("server initialization failed: httpServer is nil")
+	}
+
 	s.running = true
 	s.mu.Unlock()
 
@@ -426,6 +432,11 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.RLock()
 		httpServer := s.httpServer
 		s.mu.RUnlock()
+
+		if httpServer == nil {
+			errChan <- fmt.Errorf("HTTP server is nil")
+			return
+		}
 
 		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server error: %w", err)
