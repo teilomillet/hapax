@@ -20,7 +20,7 @@ import (
 const (
 	testTimeout    = 60 * time.Second
 	containerName  = "hapax-test"
-	containerPort  = "8080"
+	containerPort  = "8081"
 	healthEndpoint = "http://localhost:" + containerPort + "/health"
 )
 
@@ -72,7 +72,7 @@ func TestDockerBuild(t *testing.T) {
 	// Create test configuration file with all necessary settings
 	configContent := []byte(`
 server:
-  port: 8080
+  port: 8081
   read_timeout: 30s
   write_timeout: 30s
 llm:
@@ -262,7 +262,7 @@ func TestDockerCompose(t *testing.T) {
 	configPath := filepath.Join(projectRoot, "config.yaml")
 	configContent := []byte(`
 server:
-  port: 8080
+  port: 8081
   read_timeout: 30s
   write_timeout: 30s
 llm:

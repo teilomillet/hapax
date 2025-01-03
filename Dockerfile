@@ -42,11 +42,11 @@ COPY prometheus.yml ./prometheus.yml
 USER hapax
 
 # Expose ports
-EXPOSE 8080
+EXPOSE 8081
 
 # Set healthcheck
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+  CMD curl -f http://localhost:8081/health || exit 1
 
 # Run the application
 ENTRYPOINT ["./hapax"]

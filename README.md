@@ -81,6 +81,23 @@ docker run -p 8080:8080 \
 
 Default configuration is provided but can be customized via `config.yaml`:
 ```yaml
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 45s
+  max_header_bytes: 2097152  # 2MB
+  shutdown_timeout: 30s
+  http3:  # Optional HTTP/3 support
+    enabled: true
+    port: 443  # Default HTTPS/QUIC port
+    tls_cert_file: "/path/to/cert.pem"
+    tls_key_file: "/path/to/key.pem"
+    idle_timeout: 30s
+    max_bi_streams_concurrent: 100
+    max_uni_streams_concurrent: 100
+    max_stream_receive_window: 6291456      # 6MB
+    max_connection_receive_window: 15728640  # 15MB
+
 circuitBreaker:
   maxRequests: 100
   interval: 30s
@@ -113,9 +130,23 @@ The health monitoring system operates with enterprise-grade configurability. Che
 ### Production Safeguards
 System integrity is maintained through multiple safeguards: request deduplication prevents redundant processing, automatic failover ensures continuous operation, circuit breaker patterns protect against cascade failures, and structured JSON logging with correlation IDs enables thorough debugging.
 
+### Protocol Support
+The server supports both HTTP/1.1 and HTTP/3 (QUIC) protocols:
+- HTTP/1.1 for universal compatibility
+- HTTP/3 for improved performance:
+  - Reduced latency through 0-RTT connections
+  - Better multiplexing with independent streams
+  - Improved congestion control
+  - Automatic connection migration
+  - Built-in TLS 1.3 encryption
+
 ## Technical Requirements
 
-Running Hapax requires a Docker-compatible environment with network access to AI providers. The system operates efficiently with 1GB RAM, though 4GB is recommended for production deployments. Access credentials (API keys) are required for supported providers: OpenAI, Anthropic, etc./.
+Running Hapax requires:
+- Docker-compatible environment with network access to AI providers
+- 1GB RAM minimum (4GB recommended for production)
+- TLS certificates for HTTP/3 support (if enabled)
+- Access credentials (API keys) for supported providers: OpenAI, Anthropic, etc.
 
 ## Documentation
 

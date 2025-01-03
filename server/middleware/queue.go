@@ -106,11 +106,16 @@ func NewQueueMiddleware(cfg QueueConfig) *QueueMiddleware {
 		done:      make(chan struct{}),
 	}
 
+	// Set initial size first
+	qm.maxSize.Store(cfg.InitialSize)
+
 	// Try to load previous state
 	if cfg.StatePath != "" {
 		if err := qm.loadState(); err != nil {
-			// If no state exists, use initial size
-			qm.maxSize.Store(cfg.InitialSize)
+			// Log error but continue with initial size
+			if qm.metrics != nil {
+				qm.metrics.ErrorsTotal.WithLabelValues("queue_load_state").Inc()
+			}
 		}
 
 		// Start persistence goroutine if save interval is specified
@@ -118,8 +123,6 @@ func NewQueueMiddleware(cfg QueueConfig) *QueueMiddleware {
 			qm.persistTicker = time.NewTicker(cfg.SaveInterval)
 			go qm.persistStateRoutine()
 		}
-	} else {
-		qm.maxSize.Store(cfg.InitialSize)
 	}
 
 	return qm

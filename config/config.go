@@ -50,6 +50,42 @@ type ServerConfig struct {
 	// ShutdownTimeout specifies how long to wait for the server to shutdown
 	// gracefully before forcing termination (default: 30s)
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+
+	// HTTP3 configuration (optional)
+	HTTP3 *HTTP3Config `yaml:"http3,omitempty"`
+}
+
+// HTTP3Config holds configuration specific to the HTTP/3 server.
+// HTTP/3 requires TLS, so certificate configuration is mandatory.
+type HTTP3Config struct {
+	// Enable HTTP/3 support
+	Enabled bool `yaml:"enabled"`
+
+	// Port for HTTP/3 (QUIC) traffic (default: 443)
+	Port int `yaml:"port"`
+
+	// TLSCertFile is the path to the TLS certificate file
+	TLSCertFile string `yaml:"tls_cert_file"`
+
+	// TLSKeyFile is the path to the TLS private key file
+	TLSKeyFile string `yaml:"tls_key_file"`
+
+	// IdleTimeout is the maximum time to wait for the next request when keep-alives are enabled
+	IdleTimeout time.Duration `yaml:"idle_timeout"`
+
+	// MaxBiStreamsConcurrent is the maximum number of concurrent bidirectional streams
+	// that a peer is allowed to open. The default is 100.
+	MaxBiStreamsConcurrent int64 `yaml:"max_bi_streams_concurrent"`
+
+	// MaxUniStreamsConcurrent is the maximum number of concurrent unidirectional streams
+	// that a peer is allowed to open. The default is 100.
+	MaxUniStreamsConcurrent int64 `yaml:"max_uni_streams_concurrent"`
+
+	// MaxStreamReceiveWindow is the stream-level flow control window for receiving data
+	MaxStreamReceiveWindow uint64 `yaml:"max_stream_receive_window"`
+
+	// MaxConnectionReceiveWindow is the connection-level flow control window for receiving data
+	MaxConnectionReceiveWindow uint64 `yaml:"max_connection_receive_window"`
 }
 
 // LLMConfig holds LLM-specific configuration.
@@ -275,6 +311,15 @@ func DefaultConfig() *Config {
 			WriteTimeout:    45 * time.Second,
 			MaxHeaderBytes:  2 << 20, // 2MB for larger headers
 			ShutdownTimeout: 30 * time.Second,
+			HTTP3: &HTTP3Config{
+				Enabled:                    false, // Disabled by default
+				Port:                       443,   // Default HTTPS/QUIC port
+				IdleTimeout:                30 * time.Second,
+				MaxBiStreamsConcurrent:     100,
+				MaxUniStreamsConcurrent:    100,
+				MaxStreamReceiveWindow:     6 * 1024 * 1024,  // 6MB
+				MaxConnectionReceiveWindow: 15 * 1024 * 1024, // 15MB
+			},
 		},
 
 		LLM: LLMConfig{
@@ -529,6 +574,41 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.ShutdownTimeout < 0 {
 		return fmt.Errorf("negative shutdown timeout: %v", c.Server.ShutdownTimeout)
+	}
+
+	// HTTP/3 validation
+	if c.Server.HTTP3 != nil && c.Server.HTTP3.Enabled {
+		if c.Server.HTTP3.Port < 0 || c.Server.HTTP3.Port > 65535 {
+			return fmt.Errorf("invalid HTTP/3 port: %d", c.Server.HTTP3.Port)
+		}
+		if c.Server.HTTP3.TLSCertFile == "" {
+			return fmt.Errorf("HTTP/3 enabled but TLS certificate file not specified")
+		}
+		if c.Server.HTTP3.TLSKeyFile == "" {
+			return fmt.Errorf("HTTP/3 enabled but TLS key file not specified")
+		}
+		if c.Server.HTTP3.IdleTimeout < 0 {
+			return fmt.Errorf("negative HTTP/3 idle timeout: %v", c.Server.HTTP3.IdleTimeout)
+		}
+		if c.Server.HTTP3.MaxBiStreamsConcurrent < 0 {
+			return fmt.Errorf("negative HTTP/3 max bidirectional streams: %d", c.Server.HTTP3.MaxBiStreamsConcurrent)
+		}
+		if c.Server.HTTP3.MaxUniStreamsConcurrent < 0 {
+			return fmt.Errorf("negative HTTP/3 max unidirectional streams: %d", c.Server.HTTP3.MaxUniStreamsConcurrent)
+		}
+		if c.Server.HTTP3.MaxStreamReceiveWindow == 0 {
+			return fmt.Errorf("HTTP/3 max stream receive window must be positive")
+		}
+		if c.Server.HTTP3.MaxConnectionReceiveWindow == 0 {
+			return fmt.Errorf("HTTP/3 max connection receive window must be positive")
+		}
+		// Check if TLS files exist and are readable
+		if _, err := os.Stat(c.Server.HTTP3.TLSCertFile); err != nil {
+			return fmt.Errorf("HTTP/3 TLS certificate file not accessible: %w", err)
+		}
+		if _, err := os.Stat(c.Server.HTTP3.TLSKeyFile); err != nil {
+			return fmt.Errorf("HTTP/3 TLS key file not accessible: %w", err)
+		}
 	}
 
 	// LLM validation

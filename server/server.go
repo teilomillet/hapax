@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/teilomillet/gollm"
 	"github.com/teilomillet/hapax/config"
 	"github.com/teilomillet/hapax/errors"
@@ -120,12 +122,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // The running boolean tracks whether the server is operational, while the mu mutex protects concurrent access to this state.
 // This ensures that multiple goroutines do not interfere with each other when checking or updating the server's status.
 type Server struct {
-	httpServer *http.Server
-	config     config.Watcher
-	logger     *zap.Logger
-	llm        gollm.LLM
-	running    bool       // Track server state
-	mu         sync.Mutex // Protect state changes
+	httpServer  *http.Server
+	http3Server *http3.Server // HTTP/3 server instance
+	config      config.Watcher
+	logger      *zap.Logger
+	llm         gollm.LLM
+	running     bool       // Track server state
+	mu          sync.Mutex // Protect state changes
 }
 
 // NewServer creates a new server with the specified configuration and handler.
@@ -201,6 +204,24 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
 	}
 
+	// Create HTTP/3 server if enabled
+	var newHTTP3Server *http3.Server
+	if cfg.Server.HTTP3 != nil && cfg.Server.HTTP3.Enabled {
+		quicConfig := &quic.Config{
+			MaxStreamReceiveWindow:     cfg.Server.HTTP3.MaxStreamReceiveWindow,
+			MaxConnectionReceiveWindow: cfg.Server.HTTP3.MaxConnectionReceiveWindow,
+			MaxIncomingStreams:         cfg.Server.HTTP3.MaxBiStreamsConcurrent,
+			MaxIncomingUniStreams:      cfg.Server.HTTP3.MaxUniStreamsConcurrent,
+			KeepAlivePeriod:            cfg.Server.HTTP3.IdleTimeout / 2,
+		}
+
+		newHTTP3Server = &http3.Server{
+			Addr:       fmt.Sprintf(":%d", cfg.Server.HTTP3.Port),
+			Handler:    handler,
+			QUICConfig: quicConfig,
+		}
+	}
+
 	// If server is running, we need to stop it and start the new one
 	if s.running {
 		// Gracefully shutdown existing server
@@ -210,22 +231,49 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("failed to shutdown existing server: %w", err)
 		}
+
+		// Shutdown HTTP/3 server if it exists
+		if s.http3Server != nil {
+			if err := s.http3Server.Close(); err != nil {
+				s.logger.Error("Failed to close HTTP/3 server", zap.Error(err))
+			}
+		}
 	}
 
-	// Update server instance
+	// Update server instances
 	s.httpServer = newServer
+	s.http3Server = newHTTP3Server
 
 	// If we were running before, start the new server
 	if s.running {
 		go func() {
 			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-				s.logger.Error("Server error", zap.Error(err))
+				s.logger.Error("HTTP server error", zap.Error(err))
 			}
 		}()
+
+		// Start HTTP/3 server if enabled
+		if s.http3Server != nil {
+			go func() {
+				if err := s.http3Server.ListenAndServeTLS(
+					cfg.Server.HTTP3.TLSCertFile,
+					cfg.Server.HTTP3.TLSKeyFile,
+				); err != http.ErrServerClosed {
+					s.logger.Error("HTTP/3 server error", zap.Error(err))
+				}
+			}()
+		}
 
 		// Wait for server to be ready
 		if err := s.waitForServer(cfg.Server.Port); err != nil {
 			return fmt.Errorf("server failed to start on new port: %w", err)
+		}
+
+		// Wait for HTTP/3 server if enabled
+		if s.http3Server != nil {
+			if err := s.waitForServer(cfg.Server.HTTP3.Port); err != nil {
+				return fmt.Errorf("HTTP/3 server failed to start on new port: %w", err)
+			}
 		}
 	}
 
@@ -303,8 +351,50 @@ func (s *Server) Start(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-		return fmt.Errorf("server error: %w", err)
+	// Create error channel for server errors
+	errChan := make(chan error, 2) // Buffer for both HTTP and HTTP/3 errors
+
+	// Start HTTP server
+	go func() {
+		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("HTTP server error: %w", err)
+		}
+	}()
+
+	// Start HTTP/3 server if enabled
+	if s.http3Server != nil {
+		cfg := s.config.GetCurrentConfig()
+		go func() {
+			if err := s.http3Server.ListenAndServeTLS(
+				cfg.Server.HTTP3.TLSCertFile,
+				cfg.Server.HTTP3.TLSKeyFile,
+			); err != http.ErrServerClosed {
+				errChan <- fmt.Errorf("HTTP/3 server error: %w", err)
+			}
+		}()
 	}
-	return nil
+
+	// Wait for context cancellation or server error
+	select {
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		// Graceful shutdown
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.GetCurrentConfig().Server.ShutdownTimeout)
+		defer cancel()
+
+		// Shutdown HTTP server
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			s.logger.Error("Error during HTTP server shutdown", zap.Error(err))
+		}
+
+		// Shutdown HTTP/3 server if it exists
+		if s.http3Server != nil {
+			if err := s.http3Server.Close(); err != nil {
+				s.logger.Error("Error during HTTP/3 server shutdown", zap.Error(err))
+			}
+		}
+
+		return nil
+	}
 }
