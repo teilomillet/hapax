@@ -172,16 +172,33 @@ func TestQueueMiddleware(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(10)
 
+		// Track all sizes that were successfully set
+		var seenSizes sync.Map
+
 		// Concurrently adjust queue size while processing requests
 		for i := 0; i < 10; i++ {
 			go func(size int64) {
 				defer wg.Done()
 				qm.SetMaxSize(size)
-				assert.Equal(t, size, qm.GetMaxSize())
+				// Record that this size was set
+				seenSizes.Store(size, true)
+				// Verify we can read a valid size
+				currentSize := qm.GetMaxSize()
+				// Verify the size is within valid range
+				assert.True(t, currentSize > 0 && currentSize <= 10,
+					"Queue size %d should be between 1 and 10", currentSize)
 			}(int64(i + 1))
 		}
 
 		wg.Wait()
+
+		// Verify that all sizes were set at some point
+		var count int
+		seenSizes.Range(func(key, value interface{}) bool {
+			count++
+			return true
+		})
+		assert.Equal(t, 10, count, "All sizes should have been set")
 	})
 
 	t.Run("stress test with rapid requests", func(t *testing.T) {

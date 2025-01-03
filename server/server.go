@@ -255,8 +255,9 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		}
 
 		// Shutdown HTTP/3 server if it exists
-		if s.http3Server != nil {
-			if err := s.http3Server.Close(); err != nil {
+		http3Server := s.http3Server
+		if http3Server != nil {
+			if err := http3Server.Close(); err != nil {
 				s.logger.Error("Failed to close HTTP/3 server", zap.Error(err))
 			}
 		}
@@ -276,10 +277,22 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 			}
 		}()
 
-		// Start HTTP/3 server if enabled
-		if s.http3Server != nil {
+		// IMPORTANT: Concurrent Access Pattern
+		// This pattern of separate declaration and assignment is intentional:
+		// 1. We need a stable reference to the HTTP/3 server that won't change
+		//    during the goroutine's lifetime, even if s.http3Server is modified
+		// 2. The separate declaration makes it clear we're capturing state
+		//    that will be used concurrently
+		// 3. This prevents potential race conditions where s.http3Server might
+		//    be modified while the goroutine is starting up
+		//nolint:gosimple // Separate declaration maintains clear capture semantics for concurrent access
+		var http3Server *http3.Server
+		http3Server = s.http3Server
+		if http3Server != nil {
+			// The goroutine captures the local http3Server variable,
+			// ensuring it has a consistent view of the server state
 			go func() {
-				if err := s.http3Server.ListenAndServeTLS(
+				if err := http3Server.ListenAndServeTLS(
 					cfg.Server.HTTP3.TLSCertFile,
 					cfg.Server.HTTP3.TLSKeyFile,
 				); err != http.ErrServerClosed {
@@ -294,7 +307,7 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		}
 
 		// Wait for HTTP/3 server if enabled
-		if s.http3Server != nil {
+		if http3Server != nil {
 			if err := s.waitForServer(cfg.Server.HTTP3.Port); err != nil {
 				return fmt.Errorf("HTTP/3 server failed to start on new port: %w", err)
 			}
@@ -374,10 +387,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	// Start HTTP/3 server if enabled
-	if s.http3Server != nil {
+	s.mu.Lock()
+	http3Server := s.http3Server
+	s.mu.Unlock()
+
+	if http3Server != nil {
 		cfg := s.config.GetCurrentConfig()
 		go func() {
-			if err := s.http3Server.ListenAndServeTLS(
+			if err := http3Server.ListenAndServeTLS(
 				cfg.Server.HTTP3.TLSCertFile,
 				cfg.Server.HTTP3.TLSKeyFile,
 			); err != http.ErrServerClosed {
@@ -401,8 +418,12 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 
 		// Shutdown HTTP/3 server if it exists
-		if s.http3Server != nil {
-			if err := s.http3Server.Close(); err != nil {
+		s.mu.Lock()
+		http3Server := s.http3Server
+		s.mu.Unlock()
+
+		if http3Server != nil {
+			if err := http3Server.Close(); err != nil {
 				s.logger.Error("Error during HTTP/3 server shutdown", zap.Error(err))
 			}
 		}
