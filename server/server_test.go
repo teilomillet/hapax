@@ -313,6 +313,19 @@ func TestServer(t *testing.T) {
 			WriteTimeout:    10 * time.Second,
 			MaxHeaderBytes:  1 << 20,
 			ShutdownTimeout: 30 * time.Second,
+			HTTP3: &config.HTTP3Config{
+				Enabled:                    false,
+				Port:                       8443,
+				MaxStreamReceiveWindow:     10 * 1024 * 1024,
+				MaxConnectionReceiveWindow: 15 * 1024 * 1024,
+				MaxBiStreamsConcurrent:     100,
+				MaxUniStreamsConcurrent:    100,
+				Enable0RTT:                 false,
+				Allow0RTTReplay:            false,
+				Max0RTTSize:                1024 * 1024,
+				UDPReceiveBufferSize:       1024 * 1024,
+				IdleTimeout:                30 * time.Second,
+			},
 		},
 		LLM: config.LLMConfig{
 			Provider: "mock",
@@ -335,15 +348,9 @@ func TestServer(t *testing.T) {
 	mockWatcher := mocks.NewMockConfigWatcher(cfg)
 
 	// Create server with mocked dependencies
-	server := &Server{
-		logger: logger,
-		config: mockWatcher,
-		llm:    mockLLM, // Store the mock LLM in the server
-	}
-
-	// Initialize server with current config
-	if err := server.updateServerConfig(cfg); err != nil {
-		t.Fatalf("Failed to update server config: %v", err)
+	server, err := NewServerWithConfig(mockWatcher, mockLLM, logger)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
 	}
 
 	// Create context with cancel for server lifecycle
@@ -381,6 +388,19 @@ func TestServer(t *testing.T) {
 				WriteTimeout:    10 * time.Second,
 				MaxHeaderBytes:  1 << 20,
 				ShutdownTimeout: 30 * time.Second,
+				HTTP3: &config.HTTP3Config{
+					Enabled:                    false,
+					Port:                       8444,
+					MaxStreamReceiveWindow:     10 * 1024 * 1024,
+					MaxConnectionReceiveWindow: 15 * 1024 * 1024,
+					MaxBiStreamsConcurrent:     100,
+					MaxUniStreamsConcurrent:    100,
+					Enable0RTT:                 false,
+					Allow0RTTReplay:            false,
+					Max0RTTSize:                1024 * 1024,
+					UDPReceiveBufferSize:       1024 * 1024,
+					IdleTimeout:                30 * time.Second,
+				},
 			},
 			LLM: config.LLMConfig{
 				Provider: "mock",

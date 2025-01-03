@@ -196,21 +196,18 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Create new handler and router
-	handler := NewRouter(s.llm, cfg, s.logger)
-
-	// Create new HTTP server with updated config
+	// Create new HTTP server instance
 	newServer := &http.Server{
 		Addr:           fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:        handler,
+		Handler:        NewRouter(s.llm, cfg, s.logger),
 		ReadTimeout:    cfg.Server.ReadTimeout,
 		WriteTimeout:   cfg.Server.WriteTimeout,
 		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
 	}
 
-	// Create HTTP/3 server if enabled
+	// Create new HTTP/3 server if enabled
 	var newHTTP3Server *http3.Server
-	if cfg.Server.HTTP3 != nil && cfg.Server.HTTP3.Enabled {
+	if cfg.Server.HTTP3.Enabled {
 		quicConfig := &quic.Config{
 			MaxStreamReceiveWindow:     cfg.Server.HTTP3.MaxStreamReceiveWindow,
 			MaxConnectionReceiveWindow: cfg.Server.HTTP3.MaxConnectionReceiveWindow,
@@ -221,10 +218,10 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		}
 
 		// If 0-RTT is enabled but replay is not allowed, wrap the handler
-		var http3Handler http.Handler = handler
+		var http3Handler http.Handler = NewRouter(s.llm, cfg, s.logger)
 		if cfg.Server.HTTP3.Enable0RTT && !cfg.Server.HTTP3.Allow0RTTReplay {
 			http3Handler = &replayProtectionHandler{
-				handler: handler,
+				handler: NewRouter(s.llm, cfg, s.logger),
 				logger:  s.logger,
 				seen:    sync.Map{},
 				maxSize: cfg.Server.HTTP3.Max0RTTSize,
@@ -247,8 +244,8 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 		}
 	}
 
-	// If server is running, we need to stop it and start the new one
-	if s.running {
+	wasRunning := s.running
+	if wasRunning {
 		// Gracefully shutdown existing server
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -263,6 +260,7 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 				s.logger.Error("Failed to close HTTP/3 server", zap.Error(err))
 			}
 		}
+		s.running = false
 	}
 
 	// Update server instances
@@ -270,7 +268,8 @@ func (s *Server) updateServerConfig(cfg *config.Config) error {
 	s.http3Server = newHTTP3Server
 
 	// If we were running before, start the new server
-	if s.running {
+	if wasRunning {
+		s.running = true
 		go func() {
 			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 				s.logger.Error("HTTP server error", zap.Error(err))
@@ -337,27 +336,11 @@ func (s *Server) handleConfigUpdates(configChan <-chan *config.Config) {
 			s.llm = newLLM
 		}
 
-		// Create temporary server with new config
-		tempServer := &http.Server{}
+		// Update server configuration
 		if err := s.updateServerConfig(newConfig); err != nil {
 			s.logger.Error("Failed to update server config", zap.Error(err))
 			continue
 		}
-
-		// Gracefully shutdown existing connections
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := s.httpServer.Shutdown(ctx); err != nil {
-			s.logger.Error("Error during server shutdown", zap.Error(err))
-		}
-		cancel()
-
-		// Start server with new configuration
-		s.httpServer = tempServer
-		go func() {
-			if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-				s.logger.Error("Server error", zap.Error(err))
-			}
-		}()
 
 		s.logger.Info("Server restarted with new configuration")
 	}
@@ -367,6 +350,10 @@ func (s *Server) handleConfigUpdates(configChan <-chan *config.Config) {
 // It handles graceful shutdown when the context is cancelled, ensuring that all connections are properly closed before exiting.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("server is already running")
+	}
 	s.running = true
 	s.mu.Unlock()
 
