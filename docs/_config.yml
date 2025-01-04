@@ -9,21 +9,26 @@ heading_anchors: true
 back_to_top: true
 back_to_top_text: "Back to top"
 
+# Theme Overrides
+color_scheme: "dark"
+custom_css: true
+custom_css_path: "/assets/css/custom.css"
+
 # Typography and Spacing
-spacing_unit: 1.5
+spacing_unit: 2
 font_size: "16px"
-content_width: "1000px"
+content_width: "900px"
 typographic_spacing: true
 
 # Heading Styles
-heading_spacing: 1.5
-h1_size: "2.5rem"
-h2_size: "2rem"
-h3_size: "1.5rem"
+heading_spacing: 2.5
+h1_size: "3rem"
+h2_size: "2.5rem"
+h3_size: "1.75rem"
 h4_size: "1.25rem"
 
 # Text Styles
-body_line_height: 1.6
+body_line_height: 1.8
 body_font_family: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
 mono_font_family: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace"
 
@@ -40,8 +45,8 @@ search:
 
 # Code and Content
 enable_copy_code_button: true
-code_block_padding: "1rem"
-code_font_size: "0.9em"
+code_block_padding: "1.5rem"
+code_font_size: "0.95em"
 
 # Callouts for Important Information
 callouts:
@@ -70,8 +75,8 @@ aux_links_new_tab: true
 footer_content: "Licensed under Apache License, Version 2.0."
 
 # Additional Styles
-callouts_opacity: 0.9
-callouts_padding: "1rem"
-table_font_size: "0.9em"
+callouts_opacity: 1
+callouts_padding: "1.5rem"
+table_font_size: "0.95em"
 nav_font_size: "1rem"
-sidebar_width: "300px"
+sidebar_width: "280px"
