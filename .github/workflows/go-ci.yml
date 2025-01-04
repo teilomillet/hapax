@@ -4,8 +4,7 @@ on:
   push:
     branches: [ main ]
     tags: 
-      - 'v0.[1-9][0-9]*.[0-9]+'  # Matches v0.1.0, v0.2.0, v0.10.0, etc.
-      - 'v0.[1-9][0-9]*.[0-9]+[0-9]'  # Also matches v0.1.10, v0.2.23, etc.
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # Matches v0.1.0, v1.0.0, etc.
   pull_request:
     branches: [ main ]
 
@@ -85,7 +84,7 @@ jobs:
     name: Create Release
     needs: [test, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,11 +111,6 @@ jobs:
           echo "### Documentation" >> $GITHUB_ENV
           git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^docs' | sed 's/docs: /* /' >> $GITHUB_ENV || true
           
-          # Performance
-          echo "" >> $GITHUB_ENV
-          echo "### Performance Improvements" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^perf' | sed 's/perf: /* /' >> $GITHUB_ENV || true
-          
           echo "EOF" >> $GITHUB_ENV
 
       - name: Download binary
@@ -127,6 +121,8 @@ jobs:
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           body: ${{ env.CHANGELOG }}
           files: ./hapax/hapax
