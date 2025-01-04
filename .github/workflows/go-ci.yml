@@ -112,26 +112,20 @@ jobs:
           
           # Features
           echo "### Features" >> $GITHUB_ENV
-          # First maintainer commits without attribution
-          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* feat' | sed 's/feat: /* /' >> $GITHUB_ENV || true
-          # Then contributor commits with attribution
-          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* feat' | grep -v '(teilomillet)' | sed 's/feat: /* /' >> $GITHUB_ENV || true
+          # All commits, with attribution only for contributors
+          git log $RANGE --pretty=format:'* %s%ae' | grep -i '^* feat' | sed 's/feat: /* /' | sed "s/teilomillet@.*$//" | sed 's/\([^@]*\)@\(.*\)/ (@\2)/' >> $GITHUB_ENV || true
           echo "" >> $GITHUB_ENV
           
           # Fixes
           echo "### Bug Fixes" >> $GITHUB_ENV
-          # Maintainer fixes without attribution
-          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* fix' | sed 's/fix: /* /' >> $GITHUB_ENV || true
-          # Contributor fixes with attribution
-          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* fix' | grep -v '(teilomillet)' | sed 's/fix: /* /' >> $GITHUB_ENV || true
+          # All commits, with attribution only for contributors
+          git log $RANGE --pretty=format:'* %s%ae' | grep -i '^* fix' | sed 's/fix: /* /' | sed "s/teilomillet@.*$//" | sed 's/\([^@]*\)@\(.*\)/ (@\2)/' >> $GITHUB_ENV || true
           echo "" >> $GITHUB_ENV
           
           # Documentation
           echo "### Documentation" >> $GITHUB_ENV
-          # Maintainer docs without attribution
-          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* docs' | sed 's/docs: /* /' >> $GITHUB_ENV || true
-          # Contributor docs with attribution
-          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* docs' | grep -v '(teilomillet)' | sed 's/docs: /* /' >> $GITHUB_ENV || true
+          # All commits, with attribution only for contributors
+          git log $RANGE --pretty=format:'* %s%ae' | grep -i '^* docs' | sed 's/docs: /* /' | sed "s/teilomillet@.*$//" | sed 's/\([^@]*\)@\(.*\)/ (@\2)/' >> $GITHUB_ENV || true
           echo "" >> $GITHUB_ENV
 
           # Dependencies
@@ -148,8 +142,8 @@ jobs:
           
           # List contributors (excluding maintainer)
           echo "## Contributors" >> $GITHUB_ENV
-          git log $RANGE --format='%aN' | sort -u | grep -v 'teilomillet' | while read name; do
-            echo "* @$name" >> $GITHUB_ENV
+          git log $RANGE --format='%aE' | sort -u | grep -v 'teilomillet' | sed 's/.*@/@/' | while read handle; do
+            echo "* $handle" >> $GITHUB_ENV
           done
           
           echo "EOF" >> $GITHUB_ENV
