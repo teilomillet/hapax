@@ -94,22 +94,63 @@ jobs:
         id: changelog
         run: |
           echo "CHANGELOG<<EOF" >> $GITHUB_ENV
-          echo "## What's Changed" >> $GITHUB_ENV
+          
+          # Get tag message for overview
+          TAG_MSG=$(git tag -l --format='%(contents)' $(git describe --tags --abbrev=0))
+          echo "$TAG_MSG" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          
+          # For first release, get all commits
+          if ! git tag --sort=-v:refname | grep -q '^v'; then
+            RANGE="$(git rev-list --max-parents=0 HEAD)..HEAD"
+          else
+            RANGE="$(git describe --tags --abbrev=0 HEAD^)..HEAD"
+          fi
+          
+          echo "## Changes" >> $GITHUB_ENV
           echo "" >> $GITHUB_ENV
           
           # Features
           echo "### Features" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^feat' | sed 's/feat: /* /' >> $GITHUB_ENV || true
+          # First maintainer commits without attribution
+          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* feat' | sed 's/feat: /* /' >> $GITHUB_ENV || true
+          # Then contributor commits with attribution
+          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* feat' | grep -v '(teilomillet)' | sed 's/feat: /* /' >> $GITHUB_ENV || true
+          echo "" >> $GITHUB_ENV
           
           # Fixes
+          echo "### Bug Fixes" >> $GITHUB_ENV
+          # Maintainer fixes without attribution
+          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* fix' | sed 's/fix: /* /' >> $GITHUB_ENV || true
+          # Contributor fixes with attribution
+          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* fix' | grep -v '(teilomillet)' | sed 's/fix: /* /' >> $GITHUB_ENV || true
           echo "" >> $GITHUB_ENV
-          echo "### Fixes" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^fix' | sed 's/fix: /* /' >> $GITHUB_ENV || true
           
           # Documentation
-          echo "" >> $GITHUB_ENV
           echo "### Documentation" >> $GITHUB_ENV
-          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'%s' | grep -i '^docs' | sed 's/docs: /* /' >> $GITHUB_ENV || true
+          # Maintainer docs without attribution
+          git log $RANGE --pretty=format:'* %s ([%h](https://github.com/teilomillet/hapax/commit/%H))' --author="teilomillet" | grep -i '^* docs' | sed 's/docs: /* /' >> $GITHUB_ENV || true
+          # Contributor docs with attribution
+          git log $RANGE --pretty=format:'* %s (%aN) ([%h](https://github.com/teilomillet/hapax/commit/%H))' | grep -i '^* docs' | grep -v '(teilomillet)' | sed 's/docs: /* /' >> $GITHUB_ENV || true
+          echo "" >> $GITHUB_ENV
+
+          # Dependencies
+          echo "## Dependency Updates" >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          if [ -f "go.mod" ]; then
+            echo '```diff' >> $GITHUB_ENV
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              git diff HEAD^ HEAD go.mod | grep '^[+-]' | grep -v '^[+-]module' >> $GITHUB_ENV || true
+            fi
+            echo '```' >> $GITHUB_ENV
+          fi
+          echo "" >> $GITHUB_ENV
+          
+          # List contributors (excluding maintainer)
+          echo "## Contributors" >> $GITHUB_ENV
+          git log $RANGE --format='%aN' | sort -u | grep -v 'teilomillet' | while read name; do
+            echo "* @$name" >> $GITHUB_ENV
+          done
           
           echo "EOF" >> $GITHUB_ENV
 
@@ -128,4 +169,4 @@ jobs:
           files: ./hapax/hapax
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
