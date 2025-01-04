@@ -1,0 +1,96 @@
+/* Typography Enhancements */
+.main-content {
+    font-size: var(--font-size, 16px);
+    line-height: var(--body-line-height, 1.6);
+}
+
+/* Heading Styles */
+.main-content h1 {
+    margin-top: 2em;
+    margin-bottom: 1em;
+    font-weight: 500;
+    letter-spacing: -0.5px;
+}
+
+.main-content h2 {
+    margin-top: 1.5em;
+    margin-bottom: 0.75em;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.3em;
+}
+
+.main-content h3 {
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
+    font-weight: 500;
+}
+
+/* Code Blocks */
+.highlight {
+    margin: 1.5em 0;
+    border-radius: 4px;
+}
+
+.highlight pre {
+    padding: var(--code-block-padding, 1rem);
+    font-family: var(--mono-font-family);
+    font-size: var(--code-font-size, 0.9em);
+}
+
+/* Callouts */
+.callout {
+    margin: 1.5em 0;
+    padding: var(--callouts-padding, 1rem);
+    border-radius: 4px;
+    opacity: var(--callouts-opacity, 0.9);
+}
+
+.callout p:last-child {
+    margin-bottom: 0;
+}
+
+/* Lists */
+.main-content ul,
+.main-content ol {
+    margin: 0.8em 0;
+    padding-left: 1.5em;
+}
+
+.main-content li {
+    margin: 0.3em 0;
+}
+
+/* Links */
+.main-content a {
+    text-decoration: none;
+    border-bottom: 1px solid var(--link-color);
+}
+
+.main-content a:hover {
+    border-bottom-width: 2px;
+}
+
+/* Tables */
+.main-content table {
+    margin: 1.5em 0;
+    font-size: var(--table-font-size, 0.9em);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Navigation */
+.nav-list .nav-list-item {
+    font-size: var(--nav-font-size, 1rem);
+    margin: 0.3em 0;
+}
+
+/* Search Results */
+.search-result-doc {
+    font-size: 1.1em;
+    margin-bottom: 0.5em;
+}
+
+.search-result-preview {
+    color: var(--text-color);
+    opacity: 0.8;
+} 
