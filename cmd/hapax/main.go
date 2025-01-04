@@ -20,7 +20,8 @@ var (
 	version    = flag.Bool("version", false, "Print version and exit")
 )
 
-const Version = "v0.0.26"
+// Version represents the current version of Hapax
+const Version = "v0.1.0"
 
 func main() {
 	flag.Parse()
