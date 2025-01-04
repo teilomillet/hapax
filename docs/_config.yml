@@ -1,35 +1,31 @@
-title: Hapax
-description: The reliability layer between your code and LLM providers
-remote_theme: just-the-docs/just-the-docs
+title: "Hapax"
+description: "The reliability layer between your code and LLM providers"
+remote_theme: "just-the-docs/just-the-docs"
 
 # Theme and Navigation
-color_scheme: dark
-nav_spacing: normal
+color_scheme: "dark"
+nav_spacing: "normal"
 heading_anchors: true
 back_to_top: true
 back_to_top_text: "Back to top"
 
-# Custom Styles
-custom_css: true
-custom_css_path: "/assets/css/custom.css"
-
 # Typography and Spacing
 spacing_unit: 1.5
-font_size: 16px
+font_size: "16px"
 content_width: "1000px"
 typographic_spacing: true
 
 # Heading Styles
 heading_spacing: 1.5
-h1_size: 2.5rem
-h2_size: 2rem
-h3_size: 1.5rem
-h4_size: 1.25rem
+h1_size: "2.5rem"
+h2_size: "2rem"
+h3_size: "1.5rem"
+h4_size: "1.25rem"
 
 # Text Styles
 body_line_height: 1.6
-body_font_family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif
-mono_font_family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace
+body_font_family: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+mono_font_family: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace"
 
 # Search Configuration
 search_enabled: true
@@ -38,37 +34,36 @@ search:
   previews: 3
   preview_words_before: 5
   preview_words_after: 5
-  tokenizer_separator: /[\s/]+/
+  tokenizer_separator: "/[\\s/]+/"
   rel_url: true
   button: false
 
 # Code and Content
 enable_copy_code_button: true
-code_block_padding: 1rem
-code_font_size: 0.9em
+code_block_padding: "1rem"
+code_font_size: "0.9em"
 
 # Callouts for Important Information
 callouts:
   note:
-    title: Note
-    color: blue
+    title: "Note"
+    color: "blue"
   important:
-    title: Important
-    color: purple
+    title: "Important"
+    color: "purple"
   warning:
-    title: Warning
-    color: red
+    title: "Warning"
+    color: "red"
   tip:
-    title: Tip
-    color: green
+    title: "Tip"
+    color: "green"
   security:
-    title: Security
-    color: yellow
+    title: "Security"
+    color: "yellow"
 
 # External Links
 aux_links:
-  "GitHub":
-    - "//github.com/teilomillet/hapax"
+  "GitHub": ["//github.com/teilomillet/hapax"]
 aux_links_new_tab: true
 
 # License
@@ -76,7 +71,7 @@ footer_content: "Licensed under Apache License, Version 2.0."
 
 # Additional Styles
 callouts_opacity: 0.9
-callouts_padding: 1rem
-table_font_size: 0.9em
-nav_font_size: 1rem
+callouts_padding: "1rem"
+table_font_size: "0.9em"
+nav_font_size: "1rem"
 sidebar_width: "300px"
